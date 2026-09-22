@@ -1,0 +1,8 @@
+Use stage "PROJECT_BIBLE".
+
+Concept:
+"A young Nigerian mechanic discovers that a machine left behind by his missing father can replay fragments of the past."
+
+Create only the project object. Do not include characters, locations, or episodes.
+
+Return only the JSON object as defined by your output contract. No prose, no markdown fences.

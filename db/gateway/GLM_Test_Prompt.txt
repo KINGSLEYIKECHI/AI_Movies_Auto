@@ -1,0 +1,16 @@
+Use stage "FULL".
+
+Concept:
+"A young Nigerian mechanic discovers that a machine left behind by his missing father can replay fragments of the past."
+
+Create only:
+1. project (the project bible)
+2. characters - exactly the 2 main characters
+3. locations - exactly 2 locations
+4. episodes — exactly 1 episode, with exactly 2 scenes, each scene with exactly 3 shots
+
+Do not introduce a cybernetic eye, scar, tattoo, weapon, wardrobe item, or other persistent feature unless you establish it first in the character bible.
+
+Make the two scenes logically continuous. Keep character appearance and wardrobe consistent. Do not contradict the established story.
+
+Return only the JSON object as defined by your output contract. No prose, no markdown fences.

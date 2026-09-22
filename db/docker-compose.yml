@@ -1,0 +1,107 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: glm_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-changeme}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-glm_pipeline}
+      MYSQL_USER: ${MYSQL_USER:-glm_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-changeme}
+    ports:
+      - "3306:3306"   # optional — only needed if you want to connect a desktop DB client from Windows
+    volumes:
+      - glm_mysql_data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-changeme}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - glm_net
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: glm_phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      UPLOAD_LIMIT: 64M
+    ports:
+      - "8081:80"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - glm_net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: glm_ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"   # optional — only needed for host-side debugging/curl tests
+    volumes:
+      # Points at your EXISTING native Ollama model store so glm-4.7-flash
+      # (and everything else you've already pulled) is reused, not
+      # re-downloaded. Set OLLAMA_MODELS_PATH in .env to your real path,
+      # e.g. C:\Users\YourName\.ollama — stop the native Windows Ollama
+      # app first so nothing else is writing to that folder at the same time.
+      - ${OLLAMA_MODELS_PATH}:/root/.ollama
+      - ../Modelfile:/modelfile/Modelfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - glm_net
+
+  gateway:
+    build: ./gateway
+    container_name: glm_gateway
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER:-glm_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-changeme}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-glm_pipeline}
+      OLLAMA_HOST: ${OLLAMA_HOST:-ollama:11434}
+      MODEL_NAME: ${MODEL_NAME:-glm-film-director}
+      PROJECTS_BASE_PATH: /ai_movies
+    volumes:
+      # Real project output, visible on your Windows host at whatever
+      # PROJECTS_BASE_PATH_HOST points to in .env (e.g. D:\AI_Movies).
+      - ${PROJECTS_BASE_PATH_HOST}:/ai_movies
+      # Raw GLM JSON responses, visible on host under db\gateway\outputs
+      - ./gateway/outputs:/app/outputs
+      # Scripts + prompt files mounted LIVE — edit these on Windows and the
+      # change is in effect immediately, no `docker compose build` needed.
+      # (Only requirements.txt changes still need a rebuild.)
+      - ./gateway/load_story_to_db.py:/app/load_story_to_db.py
+      - ./gateway/generate_episode_prompt.py:/app/generate_episode_prompt.py
+      - ./gateway/generate_bootstrap_prompt.py:/app/generate_bootstrap_prompt.py
+      - ./gateway/generate_scene_plan_prompt.py:/app/generate_scene_plan_prompt.py
+      - ./gateway/generate_shot_prompt.py:/app/generate_shot_prompt.py
+      - ./gateway/run_glm_prompt.py:/app/run_glm_prompt.py
+      - ./gateway/run_episode_batch.py:/app/run_episode_batch.py
+      - ./gateway/GLM_Test_Prompt.txt:/app/GLM_Test_Prompt.txt
+      - ./gateway/GLM_Test_Prompt_Small.txt:/app/GLM_Test_Prompt_Small.txt
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - glm_net
+    # Stays alive so you can `docker compose exec gateway ...` commands into it.
+    command: tail -f /dev/null
+
+networks:
+  glm_net:
+
+volumes:
+  glm_mysql_data:
