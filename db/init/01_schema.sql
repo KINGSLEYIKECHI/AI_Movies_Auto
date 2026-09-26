@@ -178,7 +178,9 @@ CREATE TABLE IF NOT EXISTS shots (
     continuity_notes         TEXT,
     created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (scene_id) REFERENCES scenes(scene_id) ON DELETE CASCADE
+    INDEX idx_shots_scene (scene_id)
+    -- No FK on scene_id: it can reference EITHER scenes.scene_id (legacy
+    -- nested EPISODE_FULL path) OR scene_plan.scene_id (SHOT_PLAN path).
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS shot_dialogue (
