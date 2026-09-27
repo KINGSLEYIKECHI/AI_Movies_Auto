@@ -24,7 +24,7 @@ from pathlib import Path
 
 import mysql.connector
 
-from generate_episode_prompt import DB_CONFIG, fetch_bibles, fetch_latest_snapshot
+from generate_episode_prompt import DB_CONFIG, fetch_bibles
 
 SHOTS_PER_EPISODE = 16  # 4 scenes x 4 shots, fixed structure — sized for ~1-3 min episodes
 
@@ -78,10 +78,34 @@ def fetch_this_scene(cursor, episode_id: str, scene_number: int):
     }
 
 
-def fetch_continuity_pointer(cursor, project_id: str, episode_id: str, scene_number: int):
+def fetch_previous_episode_ending(cursor, project_id: str, episode_number: int):
+    """Find the previous episode's LAST scene's ending_state, chaining
+    through scene_continuity directly — continuity_snapshots is only
+    populated by the old full-episode-in-one-call path, never by this
+    per-scene flow, so it can't be relied on here."""
+    if episode_number <= 1:
+        return None
+    cursor.execute(
+        "SELECT episode_id FROM scene_plan WHERE project_id = %s AND episode_id LIKE %s LIMIT 1",
+        (project_id, f"%EP_{episode_number - 1:03d}"),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    prev_episode_id = row[0]
+    cursor.execute(
+        "SELECT ending_state FROM scene_continuity WHERE episode_id = %s "
+        "ORDER BY scene_number DESC LIMIT 1",
+        (prev_episode_id,),
+    )
+    row2 = cursor.fetchone()
+    return row2[0] if row2 else None
+
+
+def fetch_continuity_pointer(cursor, project_id: str, episode_id: str, episode_number: int, scene_number: int):
     """Scene-to-scene pointer within this episode, falling back to the
-    episode-level snapshot if this is scene 1 (continuing from the
-    previous episode's ending instead)."""
+    PREVIOUS EPISODE's actual last scene ending (via scene_continuity,
+    not the unused continuity_snapshots table) if this is scene 1."""
     if scene_number > 1:
         cursor.execute(
             "SELECT ending_state FROM scene_continuity "
@@ -91,10 +115,17 @@ def fetch_continuity_pointer(cursor, project_id: str, episode_id: str, scene_num
         row = cursor.fetchone()
         if row:
             return f"(from the previous scene in this episode) {row[0]}"
+        # Previous scene in THIS episode was skipped/never generated — fall
+        # through to whatever the last available continuity point is,
+        # rather than silently claiming "no prior continuity" when there
+        # actually is history, just with a gap in it.
+        print(f"WARNING: scene {scene_number - 1} of this episode has no recorded "
+              f"ending_state (likely skipped) — continuity pointer will fall back "
+              f"to the previous episode's ending instead, which may be less precise.")
 
-    snapshot = fetch_latest_snapshot(cursor, project_id)
-    if snapshot:
-        return f"(from the end of the previous episode) {snapshot['ending_state']}"
+    prev_ending = fetch_previous_episode_ending(cursor, project_id, episode_number)
+    if prev_ending:
+        return f"(from the end of the previous episode) {prev_ending}"
 
     return "This is the very first scene of the series — no prior continuity."
 
@@ -124,7 +155,7 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int, minute
         if not this_scene:
             raise SystemExit(f"Scene {scene_number} not found in episode {episode_number}'s plan.")
 
-        continuity = fetch_continuity_pointer(cursor, project_id, episode_id, scene_number)
+        continuity = fetch_continuity_pointer(cursor, project_id, episode_id, episode_number, scene_number)
 
         loc_ids = [this_scene["location_id"]] if this_scene["location_id"] else []
         bibles = fetch_bibles(cursor, project_id, this_scene["character_ids"], loc_ids)
