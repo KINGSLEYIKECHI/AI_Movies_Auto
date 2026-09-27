@@ -1,17 +1,19 @@
 r"""
-Build the SHOT_PLAN prompt for ONE scene (exactly 5 shots), giving the
-model the full 20-scene episode map for context, a continuity pointer
-(previous scene's ending state, or the previous episode's ending state
-if this is scene 1), and only the characters/locations relevant to this
-specific scene.
+Build the SHOT_PLAN prompt for ONE scene (exactly 4 shots), giving the
+model the full episode map for context, a continuity pointer (previous
+scene's ending state, or the previous episode's actual ending if this is
+scene 1), and only the characters/locations relevant to this specific scene.
 
-Also computes the exact per-shot duration_seconds to use (from the
-episode's target runtime, divided across the fixed 100 shots/episode,
-then snapped to a valid LTX clip length) and tells the model to use that
-exact value — duration is never left to the model's judgment.
+Duration is read from the project's LOCKED model config (set once via
+set_project_models.py) — never computed per call, never left to the
+model's judgment. This is what guarantees every shot in a project uses
+the same duration and the same video model, with no drift partway through.
 
 Usage:
-    python generate_shot_prompt.py PROJECT_ID EPISODE_NUMBER SCENE_NUMBER MINUTES_PER_EPISODE
+    python generate_shot_prompt.py PROJECT_ID EPISODE_NUMBER SCENE_NUMBER
+
+Run set_project_models.py first if you haven't locked this project's
+model/duration config yet.
 
 Writes GLM_Shot_Prompt.txt, ready for:
     python run_glm_prompt.py GLM_Shot_Prompt.txt
@@ -28,20 +30,22 @@ from generate_episode_prompt import DB_CONFIG, fetch_bibles
 
 SHOTS_PER_EPISODE = 16  # 4 scenes x 4 shots, fixed structure — sized for ~1-3 min episodes
 
-# Valid discrete clip lengths your video model actually supports, in
-# seconds, ascending. Confirm/adjust these against your real LTX/Wan
-# model's supported values — this is a placeholder based on the two
-# lengths mentioned when this was designed (8s / 10s). A predicted
-# duration snaps UP to the nearest value in this list, never exceeding
-# the last (largest) entry.
-VALID_SHOT_DURATIONS = [8, 10]
 
-
-def snap_duration(raw_seconds: float) -> int:
-    for valid in VALID_SHOT_DURATIONS:
-        if raw_seconds <= valid:
-            return valid
-    return VALID_SHOT_DURATIONS[-1]  # never exceed the max
+def fetch_locked_config(cursor, project_id: str):
+    cursor.execute(
+        "SELECT image_model_key, video_model_key, locked_duration_seconds "
+        "FROM project_model_config WHERE project_id = %s",
+        (project_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise SystemExit(
+            f"No model config locked for '{project_id}'. Run this first:\n"
+            f"  python set_project_models.py {project_id} IMAGE_MODEL_KEY VIDEO_MODEL_KEY DURATION_SECONDS\n"
+            f"  (python set_project_models.py --list to see available models)"
+        )
+    image_model_key, video_model_key, duration = row
+    return {"image_model_key": image_model_key, "video_model_key": video_model_key, "duration_seconds": duration}
 
 
 def fetch_full_scene_plan(cursor, episode_id: str):
@@ -130,12 +134,14 @@ def fetch_continuity_pointer(cursor, project_id: str, episode_id: str, episode_n
     return "This is the very first scene of the series — no prior continuity."
 
 
-def build_prompt(project_id: str, episode_number: int, scene_number: int, minutes_per_episode: float) -> str:
-    per_shot_seconds = snap_duration((minutes_per_episode * 60) / SHOTS_PER_EPISODE)
+def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str:
 
     conn = mysql.connector.connect(**DB_CONFIG)
     cursor = conn.cursor()
     try:
+        config = fetch_locked_config(cursor, project_id)
+        per_shot_seconds = config["duration_seconds"]
+
         # Need the episode_id string — derive it from any scene_plan row for this episode/number.
         cursor.execute(
             "SELECT episode_id FROM scene_plan WHERE project_id = %s AND scene_number = 1 "
@@ -204,16 +210,15 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int, minute
 
 
 def main():
-    if len(sys.argv) != 5:
-        print("Usage: python generate_shot_prompt.py PROJECT_ID EPISODE_NUMBER SCENE_NUMBER MINUTES_PER_EPISODE")
+    if len(sys.argv) != 4:
+        print("Usage: python generate_shot_prompt.py PROJECT_ID EPISODE_NUMBER SCENE_NUMBER")
         sys.exit(1)
 
     project_id = sys.argv[1]
     episode_number = int(sys.argv[2])
     scene_number = int(sys.argv[3])
-    minutes_per_episode = float(sys.argv[4])
 
-    prompt = build_prompt(project_id, episode_number, scene_number, minutes_per_episode)
+    prompt = build_prompt(project_id, episode_number, scene_number)
     out_path = Path("GLM_Shot_Prompt.txt")
     out_path.write_text(prompt, encoding="utf-8")
     print(f"Wrote {out_path} ({len(prompt)} chars) for episode {episode_number}, scene {scene_number}.")
