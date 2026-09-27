@@ -11,6 +11,7 @@ COPY generate_bootstrap_prompt.py .
 COPY generate_scene_plan_prompt.py .
 COPY generate_shot_prompt.py .
 COPY set_project_models.py .
+COPY enqueue_asset_jobs.py .
 COPY run_glm_prompt.py .
 COPY run_episode_batch.py .
 COPY GLM_Test_Prompt.txt .

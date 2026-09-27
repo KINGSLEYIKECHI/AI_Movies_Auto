@@ -201,7 +201,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     episode_id             VARCHAR(64) NULL,
     scene_id                VARCHAR(64) NULL,
     shot_id                 VARCHAR(64) NULL,
-    job_type                 ENUM('story','char_image','scene_image','video','audio') NOT NULL,
+    character_id             VARCHAR(128) NULL,
+    location_id              VARCHAR(128) NULL,
+    prop_id                  VARCHAR(128) NULL,
+    job_type                 ENUM('story', 'character_reference', 'location_reference',
+                                   'prop_reference', 'shot_image', 'shot_video', 'audio') NOT NULL,
+    prompt                    TEXT NULL,
     status                    ENUM('queued','running','done','failed') NOT NULL DEFAULT 'queued',
     model_used                VARCHAR(100),
     output_path                VARCHAR(500),
@@ -209,6 +214,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE,
+    FOREIGN KEY (location_id) REFERENCES locations(location_id) ON DELETE CASCADE,
+    FOREIGN KEY (prop_id) REFERENCES props(prop_id) ON DELETE CASCADE,
     INDEX idx_jobs_status (status),
-    INDEX idx_jobs_project (project_id)
+    INDEX idx_jobs_project (project_id),
+    INDEX idx_jobs_type (job_type)
 ) ENGINE=InnoDB;

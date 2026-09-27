@@ -543,12 +543,10 @@ def create_project_folders(data: dict, project_id: str) -> Path:
             json.dumps(data["props"], ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    # Legacy path: full nested episodes (episodes -> scenes -> shots in one call)
     for ep in data.get("episodes", []):
         ep_root = root / "episodes" / ep["episode_id"]
-        (ep_root / "scenes").mkdir(parents=True, exist_ok=True)
-        (ep_root / "image_prompts").mkdir(parents=True, exist_ok=True)
-        (ep_root / "video_prompts").mkdir(parents=True, exist_ok=True)
-        (ep_root / "audio").mkdir(parents=True, exist_ok=True)
+        _ensure_episode_subfolders(ep_root)
 
         (ep_root / "episode.json").write_text(
             json.dumps(ep, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -559,14 +557,53 @@ def create_project_folders(data: dict, project_id: str) -> Path:
                 json.dumps(scene, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             for shot in scene.get("shots", []):
-                (ep_root / "image_prompts" / f"{shot['shot_id']}.txt").write_text(
-                    shot.get("image_prompt", ""), encoding="utf-8"
-                )
-                (ep_root / "video_prompts" / f"{shot['shot_id']}.txt").write_text(
-                    shot.get("video_prompt", ""), encoding="utf-8"
-                )
+                _write_shot_prompt_files(ep_root, shot)
+
+    # New path: scene_plan (lightweight beats, one call plans all scenes of
+    # an episode at once) — ensure that episode's folders exist and record
+    # each scene's plan, same spirit as the legacy per-scene json above.
+    for item in data.get("scene_plan", []):
+        episode_id = item["episode_id"]
+        ep_root = root / "episodes" / episode_id
+        _ensure_episode_subfolders(ep_root)
+        (ep_root / "scenes" / f"{item['scene_id']}.json").write_text(
+            json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    # New path: flat shots (one SHOT_PLAN call per scene) — derive the
+    # episode_id from scene_id ("EP_001_SC_02" -> "EP_001"), ensure that
+    # episode's folders exist (harmless if scene_plan already made them),
+    # and mirror the prompts to disk exactly like the legacy path does.
+    for shot in data.get("shots", []):
+        scene_id = shot["scene_id"]
+        episode_id = scene_id.split("_SC_")[0]
+        ep_root = root / "episodes" / episode_id
+        _ensure_episode_subfolders(ep_root)
+        _write_shot_prompt_files(ep_root, shot)
 
     return root
+
+
+def _ensure_episode_subfolders(ep_root: Path):
+    (ep_root / "scenes").mkdir(parents=True, exist_ok=True)
+    (ep_root / "image_prompts").mkdir(parents=True, exist_ok=True)
+    (ep_root / "video_prompts").mkdir(parents=True, exist_ok=True)
+    (ep_root / "audio").mkdir(parents=True, exist_ok=True)
+    # New — where the asset-generation phase actually writes generated
+    # media. Empty until the (future) broker runs; the pipeline never
+    # writes files here itself, only creates the folder ready to receive them.
+    (ep_root / "images").mkdir(parents=True, exist_ok=True)
+    (ep_root / "clips").mkdir(parents=True, exist_ok=True)
+
+
+def _write_shot_prompt_files(ep_root: Path, shot: dict):
+    (ep_root / "image_prompts" / f"{shot['shot_id']}.txt").write_text(
+        shot.get("image_prompt", ""), encoding="utf-8"
+    )
+    (ep_root / "video_prompts" / f"{shot['shot_id']}.txt").write_text(
+        shot.get("video_prompt", ""), encoding="utf-8"
+    )
+
 
 
 def save_continuity_snapshot(cursor, project_id: str, episodes: list):
