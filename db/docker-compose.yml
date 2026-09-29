@@ -90,6 +90,7 @@ services:
       - ./gateway/generate_shot_prompt.py:/app/generate_shot_prompt.py
       - ./gateway/set_project_models.py:/app/set_project_models.py
       - ./gateway/enqueue_asset_jobs.py:/app/enqueue_asset_jobs.py
+      - ./gateway/run_image_jobs.py:/app/run_image_jobs.py
       - ./gateway/run_glm_prompt.py:/app/run_glm_prompt.py
       - ./gateway/run_episode_batch.py:/app/run_episode_batch.py
       - ./gateway/GLM_Test_Prompt.txt:/app/GLM_Test_Prompt.txt
