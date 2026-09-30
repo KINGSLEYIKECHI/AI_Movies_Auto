@@ -73,6 +73,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-glm_pipeline}
       OLLAMA_HOST: ${OLLAMA_HOST:-ollama:11434}
       MODEL_NAME: ${MODEL_NAME:-glm-film-director}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
       PROJECTS_BASE_PATH: /ai_movies
     volumes:
       # Real project output, visible on your Windows host at whatever
