@@ -1,0 +1,45 @@
+# Start the automation layer with:
+# docker compose -f docker-compose.yml -f docker-compose.automation.yml up -d --build
+#
+# This additive compose file intentionally leaves the existing stack unchanged
+# until you opt in. n8n reaches MySQL on the private glm_net network and is
+# the review/control interface; GPU rendering remains on the local machine.
+services:
+  gateway:
+    environment:
+      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+    volumes:
+      - ./gateway/run_openai_reference_jobs.py:/app/run_openai_reference_jobs.py
+      - ./gateway/asset_review.py:/app/asset_review.py
+      - ./gateway/run_comfyui_reference_jobs.py:/app/run_comfyui_reference_jobs.py
+      - ../comfyworkflow:/app/workflows:ro
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: glm_n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      DB_TYPE: mysqldb
+      DB_MYSQLDB_HOST: mysql
+      DB_MYSQLDB_PORT: 3306
+      DB_MYSQLDB_DATABASE: ${MYSQL_DATABASE:-glm_pipeline}
+      DB_MYSQLDB_USER: ${MYSQL_USER:-glm_user}
+      DB_MYSQLDB_PASSWORD: ${MYSQL_PASSWORD:-changeme}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      GENERIC_TIMEZONE: Africa/Lagos
+    volumes:
+      - glm_n8n_data:/home/node/.n8n
+      - ${PROJECTS_BASE_PATH_HOST}:/ai_movies
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - glm_net
+
+volumes:
+  glm_n8n_data:

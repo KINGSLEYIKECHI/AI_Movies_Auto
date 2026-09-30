@@ -13,6 +13,8 @@ COPY generate_shot_prompt.py .
 COPY set_project_models.py .
 COPY enqueue_asset_jobs.py .
 COPY run_image_jobs.py .
+COPY run_openai_reference_jobs.py .
+COPY asset_review.py .
 COPY run_glm_prompt.py .
 COPY run_episode_batch.py .
 COPY GLM_Test_Prompt.txt .

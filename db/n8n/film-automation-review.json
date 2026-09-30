@@ -1,0 +1,33 @@
+{
+  "name": "GLM Film — review candidates",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "d8a5c898-9f4b-4434-95a7-2fa78d2f9e5a",
+      "name": "Start review",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://gateway:8000/projects/PROJECT_ID/review-assets?status=candidate",
+        "options": {}
+      },
+      "id": "d83bb6d7-6d0d-4c9b-bc72-93a8d5657d3d",
+      "name": "List candidate assets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    }
+  ],
+  "connections": {
+    "Start review": { "main": [[{ "node": "List candidate assets", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "b9332515-642c-40dc-96c8-a8a69ed4b33b",
+  "meta": { "templateCredsSetupCompleted": true },
+  "tags": []
+}

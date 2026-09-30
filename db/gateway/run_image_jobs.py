@@ -14,6 +14,7 @@ Requires OPENAI_API_KEY in .env.
 """
 
 import base64
+import json
 import os
 import sys
 from pathlib import Path
