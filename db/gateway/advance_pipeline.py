@@ -5,6 +5,7 @@ from pathlib import Path
 import mysql.connector
 from run_comfyui_reference_jobs import DB
 from production_control import read_settings, can_finish_stage_before_review
+from asset_control import UNRESOLVED_REJECTIONS
 
 HERE=Path(__file__).parent
 
@@ -31,8 +32,8 @@ def main():
             if cur.fetchone()[0]:print('WAITING_REVIEW: approve or reject candidate assets.');return
         cur.execute("SELECT COUNT(*) FROM jobs WHERE project_id=%s AND status IN ('failed','running')",(project,))
         if cur.fetchone()[0]:print('ATTENTION_REQUIRED: resolve failed/interrupted jobs before continuing.');return
-        cur.execute("SELECT COUNT(*) FROM asset_records a WHERE a.project_id=%s AND a.status='rejected' AND NOT EXISTS (SELECT 1 FROM jobs j JOIN jobs original ON original.id=a.job_id WHERE j.project_id=a.project_id AND j.job_type=original.job_type AND j.id>original.id AND COALESCE(j.shot_id,j.character_id,j.location_id,j.prop_id)=COALESCE(original.shot_id,original.character_id,original.location_id,original.prop_id))",(project,))
-        if cur.fetchone()[0]:print('WAITING_REGENERATION: queue a new version of rejected assets.');return
+        cur.execute(UNRESOLVED_REJECTIONS,(project,))
+        if cur.fetchone():print('WAITING_REGENERATION: queue a new version of rejected assets.');return
         execute('enqueue_asset_jobs.py',project,'references')
         execute('enqueue_asset_jobs.py',project,'shot-images')
         conn.commit()

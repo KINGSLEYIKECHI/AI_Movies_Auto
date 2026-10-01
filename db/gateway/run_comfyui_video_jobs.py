@@ -10,6 +10,7 @@ import requests
 import mysql.connector
 from run_comfyui_reference_jobs import DB, COMFYUI_URL
 from production_control import ProductionSpec, budget, read_settings
+from asset_control import read_options, upload_reference
 
 def patch_video(template, image, prompt, seconds, prefix, lora=None):
     workflow = json.loads(template.read_text(encoding='utf-8'))
@@ -68,6 +69,7 @@ def render_video(template, frame, prompt, seconds, output, job_id, lora=None):
 
 def main():
     project=sys.argv[1];limit=int(sys.argv[sys.argv.index('--limit')+1]) if '--limit' in sys.argv else 1
+    selected_job=int(sys.argv[sys.argv.index('--job-id')+1]) if '--job-id' in sys.argv else None
     conn=mysql.connector.connect(**DB);cur=conn.cursor(dictionary=True);failed=False
     try:
         cur.execute("SELECT mr.model_key,mr.workflow_template_path,pm.locked_duration_seconds FROM project_model_config pm JOIN model_registry mr ON mr.model_key=pm.video_model_key WHERE pm.project_id=%s AND mr.backend='comfyui'",(project,));model=cur.fetchone()
@@ -76,7 +78,7 @@ def main():
         spec=ProductionSpec(**settings['spec']) if settings else None
         template=Path(model['workflow_template_path'] or '')
         if not template.is_file(): raise RuntimeError('Video workflow path is missing; apply migration 13')
-        cur.execute("SELECT j.*,s.duration_seconds,s.video_prompt,a.id AS asset_id,a.output_path AS frame FROM jobs j JOIN shots s ON s.shot_id=j.shot_id JOIN asset_records a ON a.project_id=j.project_id AND a.entity_id=j.shot_id AND a.asset_type='shot_image' AND a.status='approved' WHERE j.project_id=%s AND j.job_type='shot_video' AND j.status='queued' AND a.id=(SELECT MAX(a2.id) FROM asset_records a2 WHERE a2.project_id=j.project_id AND a2.entity_id=j.shot_id AND a2.asset_type='shot_image' AND a2.status='approved') ORDER BY j.id LIMIT %s",(project,limit));jobs=cur.fetchall()
+        cur.execute("SELECT j.*,s.duration_seconds,s.video_prompt,a.id AS asset_id,a.output_path AS frame FROM jobs j JOIN shots s ON s.shot_id=j.shot_id JOIN asset_records a ON a.project_id=j.project_id AND a.entity_id=j.shot_id AND a.asset_type='shot_image' AND a.status='approved' WHERE j.project_id=%s AND j.job_type='shot_video' AND j.status='queued' AND (%s IS NULL OR j.id=%s) AND a.id=(SELECT MAX(a2.id) FROM asset_records a2 WHERE a2.project_id=j.project_id AND a2.entity_id=j.shot_id AND a2.asset_type='shot_image' AND a2.status='approved') ORDER BY j.id LIMIT %s",(project,selected_job,selected_job,limit));jobs=cur.fetchall()
         for job in jobs:
             cur.execute("UPDATE jobs SET status='running' WHERE id=%s AND status='queued'",(job['id'],));conn.commit()
             if cur.rowcount!=1: continue
@@ -93,9 +95,14 @@ def main():
                 elif seconds!=model['locked_duration_seconds']:
                     raise RuntimeError('Shot duration differs from the project lock; correct the plan before rendering')
                 prompt=re.sub(r'^\[source_image:.*?\]\s*','',job['prompt'] or job['video_prompt'])
-                render_video(template,job['frame'],prompt,seconds,job['output_path'],job['id'],spec.model_dump() if spec else None)
+                options = read_options(project, job['output_path'])
+                frame = job['frame']
+                if options.get('reference_upload_ids'):
+                    _, frame = upload_reference(project, options['reference_upload_ids'][0])
+                render_video(template,frame,prompt,seconds,job['output_path'],job['id'],spec.model_dump() if spec else None)
                 cur.execute("INSERT INTO asset_records(project_id,job_id,asset_type,entity_id,output_path,generation_backend,generation_model) VALUES(%s,%s,'shot_video',%s,%s,'comfyui',%s)",(project,job['id'],job['shot_id'],job['output_path'],model['model_key']))
-                cur.execute("INSERT IGNORE INTO job_asset_references(job_id,asset_id,reference_role) VALUES(%s,%s,'previous_shot')",(job['id'],job['asset_id']))
+                if not options.get('reference_upload_ids'):
+                    cur.execute("INSERT IGNORE INTO job_asset_references(job_id,asset_id,reference_role) VALUES(%s,%s,'previous_shot')",(job['id'],job['asset_id']))
                 cur.execute("UPDATE jobs SET status='done',error=NULL,model_used=%s WHERE id=%s",(model['model_key'],job['id']));conn.commit();print(f"Created video candidate for job {job['id']}")
             except Exception as exc:
                 conn.rollback();cur.execute("UPDATE jobs SET status='failed',error=%s WHERE id=%s",(str(exc),job['id']));conn.commit();failed=True;print(f"FAILED {job['id']}: {exc}")

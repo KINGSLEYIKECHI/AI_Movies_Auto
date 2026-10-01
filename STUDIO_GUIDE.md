@@ -72,3 +72,62 @@ are not implemented. Workflow-generated audio is preserved.
 n8n is optional for continuing production: the gateway already provides the
 timer. The schedule workflow calls `/automation/tick` and respects each project's
 enabled state and review gates. Keep it inactive unless you need that integration.
+
+## Edit accepted or rejected assets
+
+Open **Review**, select the asset's status, and choose **Edit / new version**.
+Acceptance chooses a version for use; it does not lock editing. You can also accept
+a previously rejected version or restore a previous approved version. Accepting a
+replacement moves the previous chosen version to **Previous approved versions**.
+The media files and generation prompts are preserved.
+
+Edit the prompt and choose whether to **Modify the original image**. That option
+uses OpenAI's image-edit endpoint; disabling it generates from the prompt and any
+selected references. Upload optional PNG, JPEG or WebP images (10 MB maximum;
+25 megapixels maximum) with an identity, style or composition purpose. Select up
+to three references for images. Model output can approximate a reference, so
+inspect it rather than expecting an exact copy.
+
+Choose **Queue edited version** to inspect it before rendering, or **Queue & render
+this version** to render that specific job immediately. The latter can incur an
+image API charge. Editing pauses automatic production and requires fresh prompt
+approval before automatic work resumes. Changes to a chosen reference return
+already-approved downstream media for review; they do not silently rerender it.
+
+For older rejected assets, the API can reconstruct a missing job link from the
+asset's entity. If its original image file is missing, disable modifying the original
+and regenerate from the prompt. Legacy shot assets still require a matching shot
+plan. Inspect the returned error and generation log if rendering fails.
+
+Before the first render, select a queued image prompt in **Prompts**, then choose
+**Reference images & render inputs** to attach uploads or select an OpenAI image
+model for that job. **Render this queued job** renders the selected job directly.
+
+For video, edit its action prompt and optionally select one uploaded starting
+frame. The local engine generates a new video. GPT edits apply to still images;
+edit and accept a shot frame first when you want to change a video's visual design.
+Final exports use **Assemble another cut** and preserve previous export files.
+The local Flux text-to-image fallback refuses jobs requesting OpenAI image edits,
+so it cannot silently discard your uploaded references.
+
+## Delete a production
+
+Choose **Delete production** beside the project selector. The confirmation names
+the project, shows its job/asset counts and output folder, and offers **Keep
+production** or **Yes, delete production**. No deletion happens until confirmation.
+
+Deletion removes project-owned MySQL rows (including shots without a project FK),
+asset-reference links, uploads, render options, media, production settings, planning
+checkpoints and matching gateway run records/logs. Shared models, database volumes
+and other projects are kept. Deletion is blocked by active workers, unresolved
+running jobs, links from other projects, or file paths outside the project folder.
+
+The project folder is staged under `<PROJECTS_BASE_PATH_HOST>/.deleting/` before
+the database commit. Database failure restores it. If file cleanup fails after the
+commit, the confirmation offers **Retry file cleanup**; do not treat that partial
+result as complete. Retrying also reconciles interrupted cleanup journals.
+
+Cleanup covers the pipeline's managed database, output folder and gateway logs.
+Separate backups, manually copied files and ComfyUI's own server-side history/cache
+are outside this deletion boundary. No new SQL migration is needed for these
+controls; rebuild the gateway to install the upload-validation dependency.

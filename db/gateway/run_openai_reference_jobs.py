@@ -14,7 +14,7 @@ from pathlib import Path
 
 import mysql.connector
 from dotenv import load_dotenv
-from openai import OpenAI
+from asset_control import read_options, additional_references
 
 load_dotenv(Path(__file__).parent / ".env")
 DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_PORT", "3306")),
@@ -23,10 +23,10 @@ DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_POR
 REFERENCE_TYPES = ("character_reference", "location_reference", "prop_reference")
 
 
-def next_job(cur, project_id):
+def next_job(cur, project_id, job_id=None):
     cur.execute("SELECT id,job_type,prompt,output_path,shot_id FROM jobs WHERE project_id=%s "
                 "AND job_type IN ('character_reference','location_reference','prop_reference','shot_image') "
-                "AND status='queued' ORDER BY FIELD(job_type,'character_reference','location_reference','prop_reference','shot_image'),id LIMIT 1", (project_id,))
+                "AND status='queued' AND (%s IS NULL OR id=%s) ORDER BY FIELD(job_type,'character_reference','location_reference','prop_reference','shot_image'),id LIMIT 1", (project_id, job_id, job_id))
     row = cur.fetchone()
     return dict(zip(("id", "job_type", "prompt", "output_path", "shot_id"), row)) if row else None
 
@@ -70,13 +70,15 @@ def record_candidate(cur, project_id, job, model, references):
                 (project_id, job["id"], job["job_type"], entity_id(cur, job), job["output_path"], model))
     asset_id = cur.lastrowid
     for order, (ref_id, _, role) in enumerate(references, 1):
+        if ref_id is None: continue
+        if role not in {'character_identity', 'wardrobe', 'location', 'prop', 'previous_shot', 'style'}: role = 'style'
         cur.execute("INSERT INTO job_asset_references (job_id,asset_id,reference_role,reference_order) VALUES (%s,%s,%s,%s)", (job["id"], ref_id, role, order))
     return asset_id
 
 
 def render(client, model, job, references):
     output = Path(job["output_path"]); output.parent.mkdir(parents=True, exist_ok=True)
-    if job["job_type"] in REFERENCE_TYPES:
+    if not references:
         response = client.images.generate(model=model, prompt=job["prompt"], size="1024x1536", quality="high", output_format="png", n=1)
     else:
         files = []
@@ -87,7 +89,7 @@ def render(client, model, job, references):
                     raise RuntimeError(f"Approved reference file missing: {path}")
                 files.append(open(path, "rb"))
             roles = "; ".join(f"Image {i + 1}: {role.replace('_', ' ')}" for i, (_, _, role) in enumerate(references))
-            prompt = f"Create a new cinematic shot from these approved references. {roles}. Preserve identity, wardrobe and location continuity.\n\nSHOT:\n{job['prompt']}"
+            prompt = f"Follow the instructions using these input images. {roles}. Preserve details unless the instructions ask to change them.\n\nINSTRUCTIONS:\n{job['prompt']}"
             response = client.images.edit(model=model, image=files, prompt=prompt, size="1024x1536", quality="high", output_format="png")
         finally:
             for file in files: file.close()
@@ -95,9 +97,11 @@ def render(client, model, job, references):
 
 
 def main():
+    from openai import OpenAI
     if len(sys.argv) < 2: raise SystemExit(__doc__)
     project_id = sys.argv[1]
     limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else None
+    job_id = int(sys.argv[sys.argv.index('--job-id') + 1]) if '--job-id' in sys.argv else None
     if not os.getenv("OPENAI_API_KEY"): raise SystemExit("OPENAI_API_KEY is required.")
     conn = mysql.connector.connect(**DB); cur = conn.cursor()
     try:
@@ -106,7 +110,7 @@ def main():
         if not row: raise SystemExit("Lock an OpenAI image model for this project first.")
         model = row[0]; client = OpenAI(); processed = 0; failed = False
         while limit is None or processed < limit:
-            job = next_job(cur, project_id)
+            job = next_job(cur, project_id, job_id)
             if not job: break
             references, blocker = references_for_shot(cur, project_id, job["shot_id"]) if job["job_type"] == "shot_image" else ([], None)
             if blocker:
@@ -116,9 +120,12 @@ def main():
             conn.commit()
             if claimed != 1: continue
             try:
-                render(client, model, job, references)
-                cur.execute("UPDATE jobs SET status='done',model_used=%s,error=NULL WHERE id=%s", (model, job["id"]))
-                print(f"Created candidate asset {record_candidate(cur, project_id, job, model, references)} for job {job['id']}.")
+                options = read_options(project_id, job['output_path'])
+                references = additional_references(cur, project_id, options) + references
+                selected_model = options.get('image_model_key') or model
+                render(client, selected_model, job, references)
+                cur.execute("UPDATE jobs SET status='done',model_used=%s,error=NULL WHERE id=%s", (selected_model, job["id"]))
+                print(f"Created candidate asset {record_candidate(cur, project_id, job, selected_model, references)} for job {job['id']}.")
                 conn.commit(); processed += 1
             except Exception as exc:
                 conn.rollback()

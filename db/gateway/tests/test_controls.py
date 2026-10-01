@@ -34,9 +34,9 @@ class ControlTests(unittest.TestCase):
  def test_outside_project_asset_is_never_served(self):
   with patch.object(api,'query',return_value=([{'output_path':str(Path(__file__).resolve())}],1)):
    self.assertEqual(self.client.get('/projects/example/assets/1/file').status_code,404)
- def test_review_cannot_overwrite_prior_approval(self):
+ def test_review_missing_project_is_rejected(self):
   with patch.object(api,'query',return_value=([],0)):
-   self.assertEqual(self.client.post('/projects/example/assets/1/review',json={'status':'rejected'}).status_code,409)
+   self.assertEqual(self.client.post('/projects/example/assets/1/review',json={'status':'rejected'}).status_code,404)
  def test_invalid_batch_cannot_start_work(self):
   self.assertEqual(self.client.post('/projects/example/workers/openai-references',json={'limit':0}).status_code,422)
  def test_async_run_returns_before_worker_finishes(self):

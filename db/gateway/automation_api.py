@@ -16,6 +16,8 @@ from production_control import ProductionSpec, preview, read_settings, write_set
 from run_comfyui_reference_jobs import COMFYUI_URL
 from pydantic import BaseModel, Field
 import mysql.connector
+from asset_control import IMAGE_TYPES, MAX_UPLOAD_BYTES, UNRESOLVED_REJECTIONS, project_folder, scoped_file, save_upload, upload_reference, write_options, read_options
+from project_cleanup import delete_project, recover_cleanup
 
 DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_PORT", "3306")),
       "user": os.getenv("MYSQL_USER", "glm_user"), "password": os.getenv("MYSQL_PASSWORD", "changeme"),
@@ -29,9 +31,89 @@ active = False
 class Review(BaseModel):
     status: str
 
+class AssetRevision(BaseModel):
+    prompt: str | None = Field(default=None, min_length=1, max_length=24000)
+    use_source_image: bool = False
+    reference_upload_ids: list[str] = Field(default_factory=list, max_length=3)
+    image_model_key: str | None = None
+
+class ReferenceUpload(BaseModel):
+    name: str = Field(max_length=200)
+    data: str = Field(max_length=MAX_UPLOAD_BYTES * 4 // 3 + 8)
+    role: str = 'style'
+
+class DeleteConfirmation(BaseModel):
+    confirm_project_id: str
+
+def pause_for_change(project_id):
+    settings = read_settings(project_id)
+    if settings:
+        settings.update(automation_enabled=False, prompts_approved=False)
+        write_settings(project_id, settings)
+
+def require_idle(project_id):
+    if active: raise HTTPException(409, 'Wait for the current worker to finish')
+    rows, _ = query("SELECT id FROM jobs WHERE project_id=%s AND status='running' LIMIT 1", (project_id,))
+    if rows: raise HTTPException(409, 'This project has running jobs; resolve the external submission first')
+
+@app.get('/projects/{project_id}/delete-preview')
+def deletion_preview(project_id: str):
+    project(project_id)
+    try:
+        folder = project_folder(project_id, ROOT)
+    except ValueError as exc: raise HTTPException(409, str(exc))
+    counts, _ = query('SELECT (SELECT COUNT(*) FROM jobs WHERE project_id=%s) AS jobs,(SELECT COUNT(*) FROM asset_records WHERE project_id=%s) AS assets', (project_id, project_id))
+    return {'project_id': project_id, 'folder': str(folder), **(counts[0] if counts else {})}
+
+@app.delete('/projects/{project_id}')
+def remove_project(project_id: str, body: DeleteConfirmation):
+    if body.confirm_project_id != project_id: raise HTTPException(400, 'Confirm the exact project ID')
+    try: project_folder(project_id, ROOT)
+    except ValueError as exc: raise HTTPException(400, str(exc))
+    with lock:
+        require_idle(project_id)
+        conn = mysql.connector.connect(**DB)
+        try:
+            pending = recover_cleanup(conn, ROOT, RUNS)
+            rows, _ = query('SELECT project_id FROM projects WHERE project_id=%s', (project_id,))
+            if not rows:
+                return {'deleted': True, 'cleanup_complete': project_id not in pending}
+            return delete_project(conn, project_id, ROOT, RUNS)
+        except ValueError as exc: raise HTTPException(409, str(exc))
+        except (OSError, mysql.connector.Error): raise HTTPException(503, 'Cleanup failed. Inspect gateway logs and retry; deletion was not confirmed complete')
+        finally: conn.close()
+
+@app.get('/projects/{project_id}/references')
+def uploaded_references(project_id: str):
+    project(project_id)
+    records = []
+    for path in (project_folder(project_id, ROOT) / 'uploads').glob('*.json'):
+        try:
+            record, _ = upload_reference(project_id, path.stem, ROOT)
+            record['preview_url'] = f'/projects/{project_id}/references/{path.stem}/file'
+            records.append(record)
+        except (ValueError, OSError): continue
+    return {'references': records}
+
+@app.post('/projects/{project_id}/references', status_code=201)
+def upload_reference_image(project_id: str, body: ReferenceUpload):
+    if body.role not in {'identity', 'style', 'composition'}: raise HTTPException(400, 'Unknown reference role')
+    with lock:
+        project(project_id)
+        try: return save_upload(project_id, body.data, body.name, body.role, ROOT)
+        except ValueError as exc: raise HTTPException(400, str(exc))
+
+@app.get('/projects/{project_id}/references/{reference_id}/file')
+def reference_file(project_id: str, reference_id: str):
+    project(project_id)
+    try: _, path = upload_reference(project_id, reference_id, ROOT)
+    except ValueError as exc: raise HTTPException(404, str(exc))
+    return FileResponse(path)
+
 class RunOptions(BaseModel):
     limit: int = Field(default=1, ge=1, le=100)
     episode_id: str | None = None
+    job_id: int | None = Field(default=None, ge=1)
 
 def query(sql, params=()):
     conn = mysql.connector.connect(**DB)
@@ -100,9 +182,35 @@ def asset_file(project_id: str, asset_id: int):
 @app.post("/projects/{project_id}/assets/{asset_id}/review")
 def review_asset(project_id: str, asset_id: int, body: Review):
     if body.status not in {"approved", "rejected"}: raise HTTPException(400, "Invalid review status")
-    _, changed = query("UPDATE asset_records SET status=%s,reviewed_at=NOW() WHERE id=%s AND project_id=%s AND status='candidate'", (body.status, asset_id, project_id))
-    if changed != 1: raise HTTPException(409, "Asset is missing or already reviewed")
-    return {"id": asset_id, "status": body.status}
+    with lock:
+        project(project_id)
+        require_idle(project_id)
+        conn = mysql.connector.connect(**DB); cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute('SELECT * FROM asset_records WHERE id=%s AND project_id=%s FOR UPDATE', (asset_id, project_id))
+            asset = cur.fetchone()
+            if not asset: raise HTTPException(404, 'Asset not found')
+            if asset['status'] == body.status: return {'id': asset_id, 'status': body.status, 'affected_assets': 0}
+            # Changing an approved choice or rejecting a candidate pauses automatic work.
+            if body.status == 'rejected' or asset['status'] in {'approved', 'superseded'}: pause_for_change(project_id)
+            if body.status == 'approved':
+                cur.execute("UPDATE asset_records SET status='superseded' WHERE project_id=%s AND asset_type=%s AND entity_id <=> %s AND status='approved' AND id<>%s", (project_id, asset['asset_type'], asset['entity_id'], asset_id))
+            cur.execute('UPDATE asset_records SET status=%s,reviewed_at=NOW() WHERE id=%s AND project_id=%s', (body.status, asset_id, project_id))
+            # A reference change requires checking already-produced descendants again.
+            affected = 0
+            if asset['asset_type'] in IMAGE_TYPES | {'shot_video'}:
+                if asset['asset_type'].endswith('_reference'):
+                    cur.execute("UPDATE asset_records SET status='candidate' WHERE project_id=%s AND status='approved' AND asset_type IN ('shot_image','shot_video','final_render')", (project_id,))
+                elif asset['asset_type'] == 'shot_image':
+                    cur.execute("UPDATE asset_records SET status='candidate' WHERE project_id=%s AND status='approved' AND ((asset_type='shot_video' AND entity_id=%s) OR asset_type='final_render')", (project_id, asset['entity_id']))
+                else:
+                    cur.execute("UPDATE asset_records SET status='candidate' WHERE project_id=%s AND status='approved' AND asset_type='final_render'", (project_id,))
+                affected = cur.rowcount
+                if affected: pause_for_change(project_id)
+            conn.commit()
+            return {'id': asset_id, 'status': body.status, 'affected_assets': affected}
+        except Exception: conn.rollback(); raise
+        finally: cur.close(); conn.close()
 
 @app.post("/projects/{project_id}/jobs/{job_id}/retry")
 def retry(project_id: str, job_id: int):
@@ -110,21 +218,71 @@ def retry(project_id: str, job_id: int):
     if changed != 1: raise HTTPException(409, "Only failed jobs can be retried")
     return {"id": job_id, "status": "queued"}
 
-@app.post("/projects/{project_id}/assets/{asset_id}/regenerate", status_code=202)
-def regenerate(project_id: str, asset_id: int):
+@app.get('/projects/{project_id}/assets/{asset_id}/edit')
+def asset_edit_details(project_id: str, asset_id: int):
     project(project_id)
-    rows, _ = query("SELECT a.status,j.* FROM asset_records a JOIN jobs j ON j.id=a.job_id WHERE a.project_id=%s AND a.id=%s AND a.status='rejected'", (project_id, asset_id))
-    if not rows: raise HTTPException(409, "Reject a generated asset before requesting a new version")
-    settings=read_settings(project_id)
-    if settings:
-        settings.update(automation_enabled=False,prompts_approved=False)
-        write_settings(project_id,settings)
-    job = rows[0]
-    original = Path(job['output_path']).resolve()
-    if not original.is_relative_to(ROOT / project_id): raise HTTPException(400, "Asset path outside project")
-    output = original.with_name(original.stem + '_' + uuid.uuid4().hex[:12] + original.suffix)
-    query("INSERT INTO jobs(project_id,episode_id,scene_id,shot_id,character_id,location_id,prop_id,job_type,prompt,output_path) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", tuple(job.get(key) for key in ('project_id','episode_id','scene_id','shot_id','character_id','location_id','prop_id','job_type','prompt')) + (str(output),))
-    return {"status": "queued", "output_path": str(output)}
+    rows, _ = query('SELECT a.*,j.prompt AS original_prompt FROM asset_records a LEFT JOIN jobs j ON j.id=a.job_id AND j.project_id=a.project_id WHERE a.project_id=%s AND a.id=%s', (project_id, asset_id))
+    if not rows: raise HTTPException(404, 'Asset not found')
+    asset = rows[0]
+    if not asset.get('original_prompt'):
+        source, _ = query('SELECT prompt FROM jobs WHERE project_id=%s AND job_type=%s AND COALESCE(shot_id,character_id,location_id,prop_id)=%s ORDER BY id DESC LIMIT 1', (project_id, asset['asset_type'], asset['entity_id']))
+        asset['original_prompt'] = source[0]['prompt'] if source else 'Create a cinematic ' + asset['asset_type'].replace('_', ' ') + ' for ' + str(asset['entity_id'] or '') + '.'
+    asset['can_edit_image'] = asset['asset_type'] in IMAGE_TYPES
+    return asset
+
+@app.post("/projects/{project_id}/assets/{asset_id}/regenerate", status_code=202)
+def regenerate(project_id: str, asset_id: int, body: AssetRevision = AssetRevision()):
+    with lock:
+        project(project_id)
+        require_idle(project_id)
+        asset = asset_edit_details(project_id, asset_id)
+        kind = asset['asset_type']
+        if kind not in IMAGE_TYPES | {'shot_video'}: raise HTTPException(400, 'Use Assemble another cut for final exports; this asset type has no render worker')
+        if kind == 'shot_video' and (body.use_source_image or body.image_model_key): raise HTTPException(400, 'Videos are regenerated from a starting image and video prompt; GPT image editing applies to images')
+        if kind == 'shot_video' and len(body.reference_upload_ids) > 1: raise HTTPException(400, 'Choose one optional starting frame for video')
+        options = {'source_asset_id': asset_id, 'use_source_image': body.use_source_image, 'reference_upload_ids': body.reference_upload_ids, 'image_model_key': body.image_model_key}
+        for identifier in body.reference_upload_ids:
+            try: upload_reference(project_id, identifier, ROOT)
+            except ValueError as exc: raise HTTPException(400, str(exc))
+        if body.image_model_key:
+            models, _ = query("SELECT model_key FROM model_registry WHERE model_key=%s AND model_type='image' AND backend='openai_api'", (body.image_model_key,))
+            if not models: raise HTTPException(400, 'Choose a registered OpenAI image model')
+        try:
+            original = scoped_file(project_id, asset['output_path'], ROOT)
+            if body.use_source_image and not original.is_file(): raise ValueError('Original image file is missing. Regenerate without the original image instead')
+        except ValueError as exc: raise HTTPException(400, str(exc))
+        conn = mysql.connector.connect(**DB); cur = conn.cursor(dictionary=True)
+        output = original.with_name(kind + '_' + str(asset_id) + '_' + uuid.uuid4().hex[:12] + ('.mp4' if kind == 'shot_video' else '.png'))
+        try:
+            cur.execute('SELECT * FROM jobs WHERE id=%s AND project_id=%s', (asset.get('job_id'), project_id))
+            job = cur.fetchone()
+            if not job:
+                cur.execute('SELECT * FROM jobs WHERE project_id=%s AND job_type=%s AND COALESCE(shot_id,character_id,location_id,prop_id)=%s ORDER BY id DESC LIMIT 1', (project_id, kind, asset['entity_id']))
+                job = cur.fetchone()
+            # Legacy imported assets can have no job_id; rebuild the entity link.
+            if not job:
+                job = {'project_id': project_id, 'job_type': kind}
+                column = {'character_reference': 'character_id', 'location_reference': 'location_id', 'prop_reference': 'prop_id', 'shot_image': 'shot_id', 'shot_video': 'shot_id'}[kind]
+                job[column] = asset['entity_id']
+                if column == 'shot_id':
+                    cur.execute('SELECT s.scene_id,sp.episode_id FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE s.shot_id=%s AND sp.project_id=%s', (asset['entity_id'], project_id))
+                    shot = cur.fetchone()
+                    if not shot: raise HTTPException(409, 'The legacy asset has no matching planned shot')
+                    job.update(shot)
+            pause_for_change(project_id)
+            job['prompt'] = body.prompt or asset['original_prompt']
+            columns = ('project_id','episode_id','scene_id','shot_id','character_id','location_id','prop_id','job_type','prompt')
+            cur.execute('INSERT INTO jobs(project_id,episode_id,scene_id,shot_id,character_id,location_id,prop_id,job_type,prompt,output_path) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)', tuple(job.get(key) for key in columns) + (str(output),))
+            job_id = cur.lastrowid
+            write_options(project_id, output, options, ROOT)
+            cur.execute("UPDATE asset_records SET metadata=JSON_SET(COALESCE(metadata,JSON_OBJECT()),'$.replacement_job_id',%s) WHERE id=%s AND project_id=%s", (job_id, asset_id, project_id))
+            conn.commit()
+            return {'id': job_id, 'status': 'queued', 'output_path': str(output), 'message': 'New version queued. The original is preserved. Review the prompt, then render the replacement.'}
+        except Exception:
+            conn.rollback()
+            Path(str(output) + '.options.json').unlink(missing_ok=True)
+            raise
+        finally: cur.close(); conn.close()
 
 @app.post("/projects/{project_id}/queue/{stage}")
 def queue(project_id: str, stage: str):
@@ -150,6 +308,11 @@ def run_worker(project_id: str, worker: str, body: RunOptions = RunOptions()):
             raise HTTPException(400, "Assembly requires episode_id")
         command.append(body.episode_id)
     elif worker != "planning": command += ["--limit", str(body.limit)]
+    if body.job_id:
+        if worker not in {'openai-references', 'comfy-videos'}: raise HTTPException(400, 'Individual rendering is supported for OpenAI images and ComfyUI video')
+        rows, _ = query("SELECT job_type FROM jobs WHERE id=%s AND project_id=%s AND status='queued'", (body.job_id, project_id))
+        if not rows or (worker == 'comfy-videos') != (rows[0]['job_type'] == 'shot_video'): raise HTTPException(409, 'The selected queued job does not match this worker')
+        command += ['--job-id', str(body.job_id)]
     return start_run(command, project_id, worker)
 
 
@@ -269,7 +432,7 @@ def production_dashboard(project_id: str):
     failures,_=query("SELECT id,job_type,status,error FROM jobs WHERE project_id=%s AND status IN ('failed','running') ORDER BY id",(project_id,))
     episodes,_=query('SELECT DISTINCT episode_id FROM scene_plan WHERE project_id=%s ORDER BY episode_id',(project_id,))
     # Historical rejected versions stop automation only if no newer job exists.
-    rejected,_=query("SELECT a.id FROM asset_records a WHERE a.project_id=%s AND a.status='rejected' AND a.job_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM jobs j JOIN jobs original ON original.id=a.job_id WHERE j.project_id=a.project_id AND j.job_type=original.job_type AND j.id>original.id AND COALESCE(j.shot_id,j.character_id,j.location_id,j.prop_id)=COALESCE(original.shot_id,original.character_id,original.location_id,original.prop_id))",(project_id,))
+    rejected,_=query(UNRESOLVED_REJECTIONS,(project_id,))
     next_action='continue';message='Ready to continue production.'
     planning=(settings or {}).get('planning_status')
     if planning in {'pending','running','failed'}:
@@ -302,6 +465,37 @@ def production_prompts(project_id: str):
     rows,_=query("SELECT id,job_type,scene_id,shot_id,prompt,status FROM jobs WHERE project_id=%s AND job_type IN ('character_reference','location_reference','prop_reference','shot_image','shot_video') ORDER BY id",(project_id,))
     planned,_=query("SELECT s.shot_id,s.scene_id,s.video_prompt AS prompt,s.duration_seconds FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s ORDER BY sp.scene_number,s.shot_id",(project_id,))
     return {'prompts':rows,'video_prompts':planned}
+
+@app.get('/projects/{project_id}/jobs/{job_id}/options')
+def job_options(project_id: str, job_id: int):
+    project(project_id)
+    rows, _ = query('SELECT output_path FROM jobs WHERE id=%s AND project_id=%s', (job_id, project_id))
+    if not rows: raise HTTPException(404, 'Job not found')
+    return read_options(project_id, rows[0]['output_path'], ROOT)
+
+@app.put('/projects/{project_id}/jobs/{job_id}/options')
+def edit_job_options(project_id: str, job_id: int, body: AssetRevision):
+    with lock:
+        project(project_id)
+        require_idle(project_id)
+        if (read_settings(project_id) or {}).get('automation_enabled'): raise HTTPException(409, 'Pause automatic production before editing render inputs')
+        rows, _ = query("SELECT output_path,job_type FROM jobs WHERE id=%s AND project_id=%s AND status IN ('queued','failed')", (job_id, project_id))
+        if not rows: raise HTTPException(409, 'Only queued or failed render inputs can be edited')
+        job = rows[0]
+        if job['job_type'] not in IMAGE_TYPES | {'shot_video'}: raise HTTPException(400, 'Unsupported render type')
+        options = read_options(project_id, job['output_path'], ROOT)
+        if body.use_source_image and not options.get('source_asset_id'): raise HTTPException(400, 'This job has no original image to edit')
+        if job['job_type'] == 'shot_video' and (body.use_source_image or body.image_model_key or len(body.reference_upload_ids) > 1): raise HTTPException(400, 'Videos accept one optional starting frame and use the project video engine')
+        for identifier in body.reference_upload_ids:
+            try: upload_reference(project_id, identifier, ROOT)
+            except ValueError as exc: raise HTTPException(400, str(exc))
+        if body.image_model_key:
+            models, _ = query("SELECT model_key FROM model_registry WHERE model_key=%s AND model_type='image' AND backend='openai_api'", (body.image_model_key,))
+            if not models: raise HTTPException(400, 'Choose a registered OpenAI image model')
+        options.update(use_source_image=body.use_source_image, reference_upload_ids=body.reference_upload_ids, image_model_key=body.image_model_key)
+        pause_for_change(project_id)
+        write_options(project_id, job['output_path'], options, ROOT)
+        return options
 
 @app.put('/projects/{project_id}/jobs/{job_id}/prompt')
 def edit_job_prompt(project_id: str,job_id: int,body: PromptEdit):

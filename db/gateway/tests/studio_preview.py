@@ -15,12 +15,25 @@ projects={'preview_workshop':{'project_id':'preview_workshop','title':'The Echo 
 spec=ProductionSpec(project_id='preview_workshop',title='The Echo Workshop',concept='A young mechanic discovers a machine that can replay fragments of the past.',image_model_key='test-image',episodes=2,scenes_per_episode=3,shots_per_scene=5,episode_seconds=100)
 write_settings('preview_workshop',{'spec':spec.model_dump(),'planning_status':'ready','completed':['outline'],'automation_enabled':False,'prompts_approved':False})
 models=[{'model_key':'test-image','model_type':'image','backend':'openai_api','display_name':'Configured image model (preview)','available':True},{'model_key':'ltx-2.5','model_type':'video','backend':'comfyui','display_name':'LTX 2.5','available':True},{'model_key':'minimax-h3','model_type':'video','backend':'comfyui','display_name':'MiniMax H3','available':True}]
+from PIL import Image
+image_path=Path(workspace.name)/'preview_workshop'/'assets'/'character.png'
+image_path.parent.mkdir(parents=True,exist_ok=True)
+Image.new('RGB',(512,768),'#75907b').save(image_path)
+assets=[{'id':5,'project_id':'preview_workshop','job_id':None,'status':'rejected','asset_type':'character_reference','entity_id':'CHAR_001','output_path':str(image_path),'generation_model':'Fixture model','original_prompt':'A cinematic character portrait. Change the jacket to blue while preserving the face.'}]
 def jobs(project):return [{'id':1,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'queued','prompt':'Canonical reference portrait of a Nigerian mechanic. Preserve natural facial detail, workshop clothing and warm cinematic lighting.'},{'id':2,'job_type':'shot_image','scene_id':project+'__EP_001_SC_01','shot_id':project+'__EP_001_SC_01_SH_01','status':'queued','prompt':'Wide establishing frame inside the workshop. The mechanic stands beside the machine. Warm late-afternoon light; grounded cinematic realism.'}]
 
 def query(sql,params=()):
  p=params[0] if params else 'preview_workshop'
  if sql.startswith('SELECT project_id FROM projects WHERE'):return ([projects[p]] if p in projects else [],1)
  if sql.startswith('SELECT project_id FROM projects ORDER'):return (list(projects.values()),len(projects))
+ if sql.startswith('SELECT (SELECT COUNT(*) FROM jobs'):return [{'jobs':2,'assets':len(assets)}],1
+ if sql.startswith('SELECT a.*,j.prompt'):return [assets[0]],1
+ if "asset_type='final_render'" in sql:return [],0
+ if sql.startswith('SELECT id,status,asset_type'):
+  return [asset for asset in assets if asset['status']==params[1]],len(assets)
+ if sql.startswith('SELECT output_path FROM asset_records'):return [{'output_path':str(image_path)}],1
+ if sql.startswith('SELECT output_path FROM jobs'):return [{'output_path':str(image_path)}],1
+ if sql.startswith('SELECT output_path,job_type FROM jobs'):return [{'output_path':str(image_path),'job_type':'character_reference'}],1
  if sql.startswith('INSERT INTO projects'):
   projects[params[0]]={'project_id':params[0],'title':params[1]};return [],1
  if 'FROM model_registry' in sql:return models,3
@@ -33,6 +46,18 @@ def query(sql,params=()):
  if sql.startswith('UPDATE jobs SET prompt'):return [],1
  return [],0
 api.query=query
+class Cursor:
+ lastrowid=20
+ rowcount=1
+ def execute(self,sql,params=()):self.sql=sql
+ def fetchone(self):return None
+ def close(self):pass
+class Connection:
+ def cursor(self,**kwargs):return Cursor()
+ def commit(self):pass
+ def rollback(self):pass
+ def close(self):pass
+api.mysql.connector.connect=lambda **kwargs:Connection()
 api.automation_tick=lambda:{'status':'fixture','message':'Preview only; no production scheduling.'}
 def stub_run(command,**kwargs):
  if 'plan_production.py' in command[2]:

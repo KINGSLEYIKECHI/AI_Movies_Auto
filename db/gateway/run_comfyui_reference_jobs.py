@@ -94,6 +94,10 @@ def main():
             conn.commit()
             if claimed != 1: continue
             try:
+                from asset_control import read_options
+                options = read_options(project_id, job['output_path'])
+                if options.get('use_source_image') or options.get('reference_upload_ids') or options.get('image_model_key'):
+                    raise RuntimeError('This job requests OpenAI image editing. Run the OpenAI image worker; the local text-to-image fallback cannot apply its references')
                 workflow = patch_flux2_workflow(template, job["prompt"])
                 response = requests.post(f"{COMFYUI_URL}/prompt", json={"prompt": workflow, "client_id": str(uuid.uuid4())}, timeout=30)
                 response.raise_for_status(); image = wait_for_image(response.json()["prompt_id"])
