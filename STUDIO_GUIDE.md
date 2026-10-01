@@ -191,3 +191,29 @@ ComfyUI queue is active, and refuses if the ComfyUI queue cannot be checked.
 ComfyUI releases asynchronously; refresh the activity view after a moment.
 These operations do not cancel renders or clear their queues. Models reload for
 the next local task.
+
+## Old running videos and new video versions
+
+After an interrupted ComfyUI session, restart ComfyUI and verify its queue is
+empty. In **Production**, choose **Resolve old video jobs** and confirm after
+checking ComfyUI's outputs. This pauses automation and checks saved submissions.
+Registered completed clips are preserved and their jobs marked done. Stale
+records without recoverable results become failed, so **Retry** is available.
+Submission records are archived; existing files are kept. This action submits
+no videos and refuses while ComfyUI has queued or running work.
+
+For any completed video in **Review**, choose **Edit / regenerate video**.
+Accepted, rejected and candidate clips can all create another version. Edit
+the prompt and optionally upload one starting frame, then queue or render the
+replacement. The original clip and its review status are preserved. The new
+clip returns to Review for acceptance or rejection. The selected project video
+engine is used; this regenerates from a starting image, rather than editing the
+existing video directly.
+
+The same interrupted-job check is available from PowerShell after updating and
+rebuilding the gateway:
+
+```powershell
+$base = 'http://localhost:8000/projects/nigerian_mechanic_past_machine'
+Invoke-RestMethod -Method Post "$base/resolve-video-jobs" -ContentType 'application/json' -Body '{"confirm":true}' | ConvertTo-Json -Depth 6
+```

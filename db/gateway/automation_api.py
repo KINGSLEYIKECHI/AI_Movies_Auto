@@ -27,7 +27,7 @@ DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_POR
 ROOT = Path(os.getenv("PROJECTS_BASE_PATH", "/ai_movies")).resolve()
 RUNS = Path(os.getenv("AUTOMATION_RUN_PATH", str(Path(__file__).parent / "outputs" / "runs")))
 app = FastAPI(title="GLM Film Automation")
-lock = threading.Lock()
+lock = threading.RLock()
 active = False
 
 class Review(BaseModel):
@@ -308,6 +308,57 @@ def reset_lost_video(project_id:str,job_id:int,body:LostVideoReset):
             if changed!=1:raise HTTPException(409,'Job changed while resetting; refresh its status')
         except Exception:archive.rename(sidecar);raise
         return {'status':'queued','message':'Lost submission archived and job queued. Automatic production is paused; test one video before resuming.'}
+
+class InterruptedVideoRepair(BaseModel):
+    confirm: bool = False
+
+@app.post('/projects/{project_id}/resolve-video-jobs')
+def resolve_video_jobs(project_id:str,body:InterruptedVideoRepair):
+    with lock:
+        project(project_id)
+        if active:raise HTTPException(409,'Wait for the current gateway worker to finish')
+        if not body.confirm:raise HTTPException(400,'Confirm that you checked ComfyUI outputs before resolving interrupted jobs')
+        if submission_queue_status('')!='absent':raise HTTPException(409,'ComfyUI has work queued or running. Finish or stop that work before resolving old job records')
+        settings=read_settings(project_id)
+        if settings:
+            settings['automation_enabled']=False;write_settings(project_id,settings)
+        jobs,_=query("SELECT id,shot_id,output_path FROM jobs WHERE project_id=%s AND job_type='shot_video' AND status='running' ORDER BY id",(project_id,))
+        results=[]
+        for job in jobs:
+            try:
+                output=scoped_file(project_id,job['output_path'],ROOT)
+                assets,_=query("SELECT id FROM asset_records WHERE project_id=%s AND job_id=%s AND asset_type='shot_video' AND output_path=%s",(project_id,job['id'],str(output)))
+                if assets and output.is_file():
+                    if submission_queue_status('')!='absent':raise HTTPException(409,'ComfyUI queue changed; this job was left unchanged')
+                    query("UPDATE jobs SET status='done',error=NULL WHERE project_id=%s AND id=%s AND status='running'",(project_id,job['id']))
+                    results.append({'id':job['id'],'status':'done','message':'Existing video asset preserved and job completed'});continue
+                sidecar=Path(str(output)+'.comfy.json')
+                if sidecar.exists():
+                    try:
+                        result=recover_video(project_id,job['id'])
+                        if result['status'] in {'done','failed'}:
+                            results.append({'id':job['id'],**result});continue
+                        if result['status']!='lost':
+                            results.append({'id':job['id'],**result});continue
+                    except HTTPException as exc:
+                        if exc.status_code!=409:raise
+                        # Unknown submission IDs remain untrusted; explicit repair only with an empty queue.
+                        if 'outcome unknown' not in str(exc.detail):raise
+                if submission_queue_status('')!='absent':raise HTTPException(409,'ComfyUI queue changed; this job was left unchanged')
+                archive=sidecar.with_name(sidecar.name+'.interrupted-'+uuid.uuid4().hex) if sidecar.exists() else None
+                replacement=output.with_name(output.stem+'_retry_'+uuid.uuid4().hex[:12]+output.suffix) if output.exists() else output
+                if replacement!=output:write_options(project_id,str(replacement),read_options(project_id,str(output),ROOT),ROOT)
+                if archive:sidecar.rename(archive)
+                try:
+                    _,changed=query("UPDATE jobs SET status='failed',output_path=%s,error=%s WHERE project_id=%s AND id=%s AND status='running'",(str(replacement),'Interrupted video submission resolved. Retry this job or edit an existing video to create a new version. Original files preserved.',project_id,job['id']))
+                    if changed!=1:raise HTTPException(409,'Job status changed while resolving')
+                except Exception:
+                    if archive:archive.rename(sidecar)
+                    raise
+                results.append({'id':job['id'],'status':'failed','message':'Stale running state cleared. Original files preserved; retry is available.'})
+            except (HTTPException,ValueError,OSError,requests.RequestException) as exc:
+                results.append({'id':job['id'],'status':'unresolved','message':str(exc.detail) if isinstance(exc,HTTPException) else str(exc)})
+        return {'jobs':results,'message':'Interrupted video check finished. Automation is paused. Completed clips are preserved; cleared failed jobs can be retried.'}
 
 @app.get('/projects/{project_id}/assets/{asset_id}/edit')
 def asset_edit_details(project_id: str, asset_id: int):
