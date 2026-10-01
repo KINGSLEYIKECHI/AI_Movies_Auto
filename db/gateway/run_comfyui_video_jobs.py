@@ -1,5 +1,6 @@
 """Render approved shot frames through the supplied local API workflows."""
 import json
+import hashlib
 import os
 import re
 import sys
@@ -15,6 +16,7 @@ from asset_control import read_options, upload_reference
 def patch_video(template, image, prompt, seconds, prefix, lora=None):
     workflow = json.loads(template.read_text(encoding='utf-8'))
     if '398:376' in workflow:
+        workflow['398:393']['inputs']['device']=os.getenv('LTX_TEXT_ENCODER_DEVICE','cpu')
         workflow['395']['inputs']['image'] = image
         workflow['398:376']['inputs']['value'] = prompt
         workflow['398:362']['inputs']['value'] = int(seconds)
@@ -41,6 +43,30 @@ def patch_video(template, image, prompt, seconds, prefix, lora=None):
         if node.get('class_type') == 'RandomNoise': node['inputs']['noise_seed'] = int.from_bytes(os.urandom(8), 'big') >> 1
     return workflow
 
+def save_submission(output, **updates):
+    sidecar=Path(str(output)+'.comfy.json');sidecar.parent.mkdir(parents=True,exist_ok=True)
+    data=json.loads(sidecar.read_text(encoding='utf-8')) if sidecar.exists() else {}
+    data.update(updates);data['updated_at']=time.time()
+    temporary=sidecar.with_name(sidecar.name+'.'+uuid.uuid4().hex+'.tmp')
+    temporary.write_text(json.dumps(data),encoding='utf-8');temporary.replace(sidecar)
+    return data
+
+
+def has_saved_video(output):
+    sidecar=Path(str(output)+'.comfy.json');path=Path(output)
+    if not sidecar.exists() or not path.is_file():return False
+    data=json.loads(sidecar.read_text(encoding='utf-8'))
+    return bool(data.get('download_sha256') and hashlib.sha256(path.read_bytes()).hexdigest()==data['download_sha256'])
+
+
+def submission_queue_status(prompt_id):
+    response=requests.get(COMFYUI_URL+'/queue',timeout=10);response.raise_for_status();queue=response.json()
+    if not isinstance(queue.get('queue_running'),list) or not isinstance(queue.get('queue_pending'),list):raise ValueError('ComfyUI queue response unavailable')
+    for key,phase in [('queue_running','rendering'),('queue_pending','queued')]:
+        if any(len(item)>1 and item[1]==prompt_id for item in queue[key]):return phase
+    return 'absent' if not queue['queue_running'] and not queue['queue_pending'] else 'other_work'
+
+
 def completed_video(record, output):
     """Download a reported output; never infer success from a stale local file."""
     status = record.get('status', {})
@@ -55,6 +81,7 @@ def completed_video(record, output):
                     if not response.content: raise RuntimeError('ComfyUI returned an empty video file')
                     path=Path(output);path.parent.mkdir(parents=True,exist_ok=True)
                     temporary=path.with_name(path.name+'.download');temporary.write_bytes(response.content);temporary.replace(path)
+                    if Path(str(output)+'.comfy.json').exists():save_submission(output,phase='downloaded',download_sha256=hashlib.sha256(response.content).hexdigest(),artifact=artifact)
                     return True
     if status.get('completed') or status.get('status_str') == 'success':
         raise RuntimeError('ComfyUI finished but reported no downloadable video. Inspect the SaveVideo output in its history.')
@@ -64,7 +91,10 @@ def completed_video(record, output):
 def saved_video(output):
     sidecar=Path(str(output)+'.comfy.json')
     if not sidecar.is_file():raise ValueError('No saved ComfyUI submission for this job')
-    prompt_id=json.loads(sidecar.read_text(encoding='utf-8'))['prompt_id']
+    data=json.loads(sidecar.read_text(encoding='utf-8'))
+    if data.get('phase')=='rejected' and not data.get('prompt_id'):return data['client_id'],{'status':{'status_str':'error','messages':[data.get('rejection','Submission rejected')]}}
+    if not data.get('prompt_id'):raise ValueError('Submission outcome unknown. Inspect ComfyUI queue/history before resetting; no duplicate will be submitted.')
+    prompt_id=data['prompt_id']
     response=requests.get(COMFYUI_URL+'/history/'+prompt_id,timeout=30);response.raise_for_status()
     return prompt_id,response.json().get(prompt_id)
 
@@ -88,27 +118,55 @@ def record_video(cur, project, job, model, use_uploaded_frame=False):
 
 def render_video(template, frame, prompt, seconds, output, job_id, lora=None):
     sidecar=Path(str(output)+'.comfy.json')
+    if has_saved_video(output):return
     if sidecar.is_file():
+        data=json.loads(sidecar.read_text(encoding='utf-8'))
+        if not data.get('prompt_id'):raise RuntimeError('Submission outcome unknown; inspect ComfyUI before retrying. No duplicate submitted.')
         prompt_id=json.loads(sidecar.read_text(encoding='utf-8'))['prompt_id']
         print(f'Resuming saved ComfyUI submission {prompt_id} for job {job_id}',flush=True)
     else:
+        if submission_queue_status('')!='absent':raise RuntimeError('ComfyUI queue is occupied. Resolve existing work before submitting another video.')
         with Path(frame).open('rb') as file:
             response=requests.post(COMFYUI_URL+'/upload/image',files={'image':(f'film_{uuid.uuid4().hex}.png',file,'image/png')},data={'type':'input'},timeout=120)
         response.raise_for_status();uploaded=response.json()
         image='/'.join(x for x in [uploaded.get('subfolder'),uploaded['name']] if x)
         workflow=patch_video(template,image,prompt,seconds,f'film/job_{job_id}',lora)
-        response=requests.post(COMFYUI_URL+'/prompt',json={'prompt':workflow,'client_id':str(uuid.uuid4())},timeout=30)
-        response.raise_for_status();prompt_id=response.json()['prompt_id']
-        sidecar.parent.mkdir(parents=True,exist_ok=True)
-        sidecar.write_text(json.dumps({'prompt_id':prompt_id,'workflow':workflow}),encoding='utf-8')
+        client_id=str(uuid.uuid4())
+        save_submission(output,phase='submitting',client_id=client_id,workflow=workflow,job_id=job_id)
+        response=requests.post(COMFYUI_URL+'/prompt',json={'prompt':workflow,'client_id':client_id},timeout=30)
+        try:response.raise_for_status()
+        except requests.HTTPError:
+            if 400<=response.status_code<500:save_submission(output,phase='rejected',rejection=response.text)
+            raise
+        prompt_id=response.json()['prompt_id']
+        save_submission(output,prompt_id=prompt_id,phase='submitted')
         print(f'Submitted ComfyUI prompt {prompt_id} for job {job_id}',flush=True)
     deadline=time.monotonic()+int(os.getenv('COMFYUI_TIMEOUT_SECONDS','7200'))
+    missing_since=None;outage_since=None;heartbeat=0
     while time.monotonic()<deadline:
-        response=requests.get(COMFYUI_URL+'/history/'+prompt_id,timeout=30);response.raise_for_status()
-        record=response.json().get(prompt_id)
-        if record and completed_video(record,output):return
+        try:
+            response=requests.get(COMFYUI_URL+'/history/'+prompt_id,timeout=30);response.raise_for_status()
+            record=response.json().get(prompt_id)
+            if record and completed_video(record,output):return
+            phase=submission_queue_status(prompt_id)
+            outage_since=None
+            if phase in {'absent','other_work'} and not record:
+                if missing_since is None:missing_since=time.monotonic()
+                if time.monotonic()-missing_since>=int(os.getenv('COMFYUI_MISSING_GRACE_SECONDS','30')):
+                    raise RuntimeError('Saved video submission disappeared from ComfyUI queue and history. Check saved video render; reset the lost submission only after checking for an existing output.')
+            else:missing_since=None
+            if time.monotonic()>=heartbeat:
+                save_submission(output,phase=phase)
+                print(f'Job {job_id}: ComfyUI {phase}; prompt {prompt_id}. Waiting for a completed video.',flush=True)
+                heartbeat=time.monotonic()+30
+        except requests.RequestException as exc:
+            if outage_since is None:outage_since=time.monotonic()
+            if time.monotonic()-outage_since>=int(os.getenv('COMFYUI_NETWORK_GRACE_SECONDS','90')):
+                raise RuntimeError('ComfyUI connection lost; the saved submission was preserved for recovery.') from exc
+            print(f'Job {job_id}: connection interrupted; retrying status checks only.',flush=True)
         time.sleep(2)
     raise TimeoutError(f'ComfyUI prompt {prompt_id} unresolved. Use Check saved video render before retrying.')
+
 
 def main():
     project=sys.argv[1];limit=int(sys.argv[sys.argv.index('--limit')+1]) if '--limit' in sys.argv else 1
@@ -151,8 +209,10 @@ def main():
                     except Exception as exc:print(f'Video saved; memory unload warning: {exc}',flush=True)
 
             except Exception as exc:
-                conn.rollback();cur.execute("UPDATE jobs SET status='failed',error=%s WHERE id=%s",(str(exc),job['id']));conn.commit();failed=True;print(f"FAILED {job['id']}: {exc}")
-        print(f'Processed {len(jobs)} approved-frame video job(s). Others wait for shot approval.')
+                conn.rollback();cur.execute("UPDATE jobs SET status='failed',error=%s WHERE id=%s",(str(exc),job['id']));conn.commit();failed=True;print(f"FAILED {job['id']}: {exc}",flush=True)
+                print('Batch paused after this failure. Remaining video jobs stay queued.',flush=True)
+                break
+        print('Video batch finished. Check job status for completed and remaining clips.',flush=True)
     finally:cur.close();conn.close()
     if failed:raise SystemExit(1)
 if __name__=='__main__':main()

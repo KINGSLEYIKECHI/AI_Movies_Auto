@@ -81,3 +81,33 @@ Get-ChildItem .\gateway\outputs\runs\*.log | Sort-Object LastWriteTime -Descendi
 ```
 
 Gateway container logs mainly show API/server activity; video generation errors also appear in the worker log and the ComfyUI console.
+
+
+### Video recovery after a ComfyUI crash
+
+The LTX workflow now puts its text encoder on CPU by default (`LTX_TEXT_ENCODER_DEVICE=cpu`). This avoids spending GPU memory on the encoder that failed in the supplied log; it uses system RAM and may run slower. To restore the workflow's original placement later, set `LTX_TEXT_ENCODER_DEVICE=default` in the gateway environment. The renderer still needs enough GPU and system memory for the chosen video model.
+
+Video batches stop at their first failure and leave subsequent jobs queued. A new video is submitted only when ComfyUI's queue is empty. During a render, its saved submission record and log show a waiting phase every 30 seconds. Temporary status-check network outages are retried for up to 90 seconds (`COMFYUI_NETWORK_GRACE_SECONDS`), without submitting another prompt. If a saved prompt disappears from queue and history for 30 seconds (`COMFYUI_MISSING_GRACE_SECONDS`), the worker stops and directs you to recovery. Total render timeout remains `COMFYUI_TIMEOUT_SECONDS` (default 7200). A ComfyUI thread crash can still require restarting ComfyUI; the gateway cannot prevent CUDA errors or repair that process.
+
+Completed downloads have an integrity receipt in their saved submission record. If the gateway restarts before committing the database result, recovery can reuse that verified local download even if ComfyUI no longer retains its history.
+
+After restarting ComfyUI, check its queue is empty. Under **Production → Jobs that need attention**, click **Check saved video render** for each unresolved job. If it has no queue entry or history, **Reset lost submission** appears. Inspect ComfyUI's output folder first, then confirm the reset. It archives the old submission, leaves media files intact, queues one replacement and pauses automation. An existing local video file or ComfyUI history/queue work blocks reset. Test one video before restarting automatic production.
+
+For the reported jobs, the API reset command is available only after checking recovery and confirming that ComfyUI's queue is empty and no untracked finished clip exists:
+
+```powershell
+$projectApi = 'http://localhost:8000/projects/nigerian_mechanic_past_machine'
+$reset81 = @{prompt_id='417661f8-cfff-4053-8ce5-769a06c3fa81'; confirm=$true} | ConvertTo-Json
+Invoke-RestMethod -Method Post "$projectApi/jobs/81/reset-lost-video" -ContentType 'application/json' -Body $reset81
+$reset82 = @{prompt_id='7e254082-9a9c-4ad5-a3e9-37e9f75a22a8'; confirm=$true} | ConvertTo-Json
+Invoke-RestMethod -Method Post "$projectApi/jobs/82/reset-lost-video" -ContentType 'application/json' -Body $reset82
+```
+
+These commands apply only to those saved submissions. For other jobs, use the prompt ID returned by **Check saved video render**. Submission POST timeouts with no known prompt ID remain blocked because their outcome is ambiguous; inspect the saved client ID against ComfyUI queue/history before any replacement.
+
+
+### Choose LTX 2.5 or MiniMax H3 for an existing production
+
+In **Production → Video engine for this production**, select **LTX 2.5** or **MiniMax H3**, then click **Save video engine**. The chosen engine applies to upcoming video jobs and newly generated versions; existing clips retain their original model. Switching pauses automation, retains the approved shot durations, and resets LoRA to None. Both engines require their registered ComfyUI workflow and installed model files. Models marked unavailable cannot be selected. Incompatible shot durations block the switch.
+
+Resolve running jobs and saved submissions first, and ensure ComfyUI's queue is empty. Test one video with the selected engine, then restart automation. New productions also have this choice under **Describe → Local video engine**.

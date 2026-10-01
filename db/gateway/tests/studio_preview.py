@@ -23,9 +23,12 @@ Image.new('RGB',(512,768),'#75907b').save(image_path)
 assets=[{'id':5,'project_id':'preview_workshop','job_id':None,'status':'rejected','asset_type':'character_reference','entity_id':'CHAR_001','output_path':str(image_path),'generation_model':'Fixture model','original_prompt':'A cinematic character portrait. Change the jacket to blue while preserving the face.'}]
 def jobs(project):return [{'id':1,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'done','prompt':'Canonical reference portrait of a Nigerian mechanic. Preserve natural facial detail, workshop clothing and warm cinematic lighting.'},{'id':3,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'queued','prompt':'Canonical portrait of the next character.'},{'id':2,'job_type':'shot_image','scene_id':project+'__EP_001_SC_01','shot_id':project+'__EP_001_SC_01_SH_01','status':'queued','prompt':'Wide establishing frame inside the workshop. The mechanic stands beside the machine. Warm late-afternoon light; grounded cinematic realism.'}]
 
+preview_video_engine={'value':'ltx-2.5'}
 video_fixture=os.getenv('STUDIO_FIXTURE_VIDEO')=='1'
 fixture_refreshes=0
-if video_fixture:api.active=True
+if video_fixture:
+ api.active=True
+ Path(str(image_path)+'.comfy.json').write_text(json.dumps({'prompt_id':'fixture-lost'}),encoding='utf-8')
 def query(sql,params=()):
  global fixture_refreshes
  p=params[0] if params else 'preview_workshop'
@@ -34,6 +37,11 @@ def query(sql,params=()):
  if sql.startswith('SELECT a.id,a.asset_type'):
   return [dict(id=i,asset_type=kind,entity_id=entity,name=name,output_path=str(image_path),generation_model='Fixture model') for i,kind,entity,name in [(6,'character_reference','CHAR_001','Ada'),(7,'character_reference','CHAR_002','Bayo'),(8,'location_reference','LOC_001','Workshop'),(9,'character_reference','CHAR_003','Kola')]],4
 
+ if video_fixture and sql.startswith('SELECT id,shot_id,output_path,model_used'):return [dict(id=11,shot_id='fixture-shot',output_path=str(image_path),model_used='ltx-2.5')],1
+ if sql.startswith('SELECT video_model_key,locked_duration_seconds'):return [{'video_model_key':preview_video_engine['value'],'locked_duration_seconds':6}],1
+ if sql.startswith('SELECT model_key,workflow_template_path,valid_durations'):return [dict(model_key=params[0],workflow_template_path=str(Path(__file__).resolve().parents[3]/'comfyworkflow'/'video_minimax_h3_i2v.json'),valid_durations=None,available=True)],1
+ if sql.startswith('SELECT DISTINCT COALESCE'):return [{'duration':6}],1
+ if sql.startswith('SELECT model_key,display_name,available'):return [model for model in models if model['model_type']=='video'],2
  if sql.startswith('SELECT project_id FROM projects WHERE'):return ([projects[p]] if p in projects else [],1)
  if sql.startswith('SELECT project_id FROM projects ORDER'):return (list(projects.values()),len(projects))
  if sql.startswith('SELECT status,prompt'):
@@ -67,7 +75,9 @@ api.query=query
 class Cursor:
  lastrowid=20
  rowcount=1
- def execute(self,sql,params=()):self.sql=sql
+ def execute(self,sql,params=()):
+  self.sql=sql
+  if sql.startswith('UPDATE project_model_config SET video_model_key='):preview_video_engine['value']=params[0]
  def fetchone(self):return None
  def close(self):pass
 class Connection:

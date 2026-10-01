@@ -14,7 +14,7 @@ import time
 import requests
 from production_control import ProductionSpec, preview, read_settings, write_settings, root, can_finish_stage_before_review
 from run_comfyui_reference_jobs import COMFYUI_URL
-from run_comfyui_video_jobs import saved_video, completed_video, record_video
+from run_comfyui_video_jobs import saved_video, completed_video, record_video, submission_queue_status, has_saved_video
 from pydantic import BaseModel, Field
 import mysql.connector
 from asset_control import IMAGE_TYPES, MAX_UPLOAD_BYTES, UNRESOLVED_REJECTIONS, project_folder, scoped_file, save_upload, upload_reference, write_options, read_options
@@ -257,8 +257,11 @@ def recover_video(project_id:str,job_id:int):
         try:
             output=scoped_file(project_id,job['output_path'],ROOT)
             prompt_id,record=saved_video(output)
-            if not record:return {'status':'waiting','message':f'No terminal history for ComfyUI prompt {prompt_id}. No job was reset or resubmitted.'}
-            if not completed_video(record,output):return {'status':'waiting','message':'ComfyUI has not completed this video. No job was reset.'}
+            if not record and not has_saved_video(output):
+                phase=submission_queue_status(prompt_id)
+                if phase=='absent':return {'status':'lost','prompt_id':prompt_id,'message':'The queue is empty and this submission has no history. Check ComfyUI outputs before resetting this lost submission.'}
+                return {'status':'waiting','message':f'ComfyUI submission {prompt_id}: {phase}. No job was reset or resubmitted.'}
+            if not has_saved_video(output) and not completed_video(record,output):return {'status':'waiting','message':'ComfyUI has not completed this video. No job was reset.'}
         except (ValueError,KeyError,OSError,requests.RequestException) as exc:raise HTTPException(409,str(exc))
         except RuntimeError as exc:
             query("UPDATE jobs SET status='failed',error=%s WHERE project_id=%s AND id=%s",(str(exc),project_id,job_id))
@@ -272,6 +275,39 @@ def recover_video(project_id:str,job_id:int):
         except Exception:conn.rollback();raise
         finally:cur.close();conn.close()
         return {'status':'done','message':'Saved video recovered for Review. No new render was submitted; automatic production can continue.'}
+
+class LostVideoReset(BaseModel):
+    prompt_id: str = Field(min_length=1,max_length=128)
+    confirm: bool = False
+
+@app.post('/projects/{project_id}/jobs/{job_id}/reset-lost-video')
+def reset_lost_video(project_id:str,job_id:int,body:LostVideoReset):
+    with lock:
+        project(project_id)
+        if active:raise HTTPException(409,'Wait for the gateway worker to stop before resetting a lost submission')
+        if not body.confirm:raise HTTPException(400,'Confirm that you checked ComfyUI outputs and want to submit a replacement')
+        jobs,_=query("SELECT output_path FROM jobs WHERE project_id=%s AND id=%s AND job_type='shot_video' AND status IN ('running','failed')",(project_id,job_id))
+        if not jobs:raise HTTPException(409,'Only unresolved video submissions can be reset')
+        try:
+            output=scoped_file(project_id,jobs[0]['output_path'],ROOT)
+            prompt_id,record=saved_video(output)
+            if prompt_id!=body.prompt_id:raise ValueError('Submission changed; check the saved video again')
+            if record or submission_queue_status(prompt_id)!='absent':raise ValueError('ComfyUI still has history or queued work. Recover it before resetting')
+            if output.is_file():raise ValueError('A local video file exists. Recover or inspect it before considering a replacement')
+            # Recheck immediately before the reset; preserve history and unknown submissions.
+            _,record=saved_video(output)
+            if record or submission_queue_status(prompt_id)!='absent':raise ValueError('ComfyUI state changed; no submission was reset')
+        except (ValueError,KeyError,OSError,requests.RequestException) as exc:raise HTTPException(409,str(exc))
+        sidecar=Path(str(output)+'.comfy.json');archive=sidecar.with_name(sidecar.name+'.lost-'+uuid.uuid4().hex)
+        settings=read_settings(project_id)
+        if settings:
+            settings['automation_enabled']=False;write_settings(project_id,settings)
+        sidecar.rename(archive)
+        try:
+            _,changed=query("UPDATE jobs SET status='queued',error=NULL WHERE project_id=%s AND id=%s AND status IN ('running','failed')",(project_id,job_id))
+            if changed!=1:raise HTTPException(409,'Job changed while resetting; refresh its status')
+        except Exception:archive.rename(sidecar);raise
+        return {'status':'queued','message':'Lost submission archived and job queued. Automatic production is paused; test one video before resuming.'}
 
 @app.get('/projects/{project_id}/assets/{asset_id}/edit')
 def asset_edit_details(project_id: str, asset_id: int):
@@ -462,6 +498,50 @@ def production_exports(project_id: str):
 def models():
     rows,_=query('SELECT model_key,model_type,backend,display_name,available FROM model_registry ORDER BY model_type,model_key')
     return {'models':rows,'default_image_model':os.getenv('OPENAI_IMAGE_MODEL','')}
+
+class VideoEngineChange(BaseModel):
+    video_model_key: str = Field(pattern=r'^(ltx-2\.5|minimax-h3)$')
+
+@app.get('/projects/{project_id}/video-engine')
+def video_engine(project_id:str):
+    project(project_id)
+    config,_=query('SELECT video_model_key,locked_duration_seconds FROM project_model_config WHERE project_id=%s',(project_id,))
+    choices,_=query("SELECT model_key,display_name,available FROM model_registry WHERE model_type='video' AND backend='comfyui' AND model_key IN ('ltx-2.5','minimax-h3') ORDER BY model_key")
+    return {'current':config[0] if config else None,'models':choices}
+
+@app.put('/projects/{project_id}/video-engine')
+def change_video_engine(project_id:str,body:VideoEngineChange):
+    with lock:
+        project(project_id);require_idle(project_id)
+        state=runtime_status()['comfyui']
+        if not state.get('connected') or state.get('running') or state.get('pending'):raise HTTPException(409,'Wait for an empty, connected ComfyUI queue before changing video engines')
+        models,_=query("SELECT model_key,workflow_template_path,valid_durations,available FROM model_registry WHERE model_key=%s AND model_type='video' AND backend='comfyui'",(body.video_model_key,))
+        if not models or not models[0]['available']:raise HTTPException(400,'Install and register this video model as available first')
+        model=models[0]
+        if not Path(model.get('workflow_template_path') or '').is_file():raise HTTPException(400,'The registered video workflow file is missing')
+        jobs,_=query("SELECT output_path FROM jobs WHERE project_id=%s AND job_type='shot_video' AND status IN ('queued','failed')",(project_id,))
+        if any(Path(str(scoped_file(project_id,job['output_path'],ROOT))+'.comfy.json').exists() for job in jobs):raise HTTPException(409,'Recover or reset saved video submissions before changing engines')
+        config,_=query('SELECT video_model_key,locked_duration_seconds FROM project_model_config WHERE project_id=%s',(project_id,))
+        if not config:raise HTTPException(409,'This production has no video model configuration')
+        durations,_=query('SELECT DISTINCT COALESCE(s.duration_seconds,%s) AS duration FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s',(config[0]['locked_duration_seconds'],project_id))
+        valid=model.get('valid_durations');valid=json.loads(valid) if isinstance(valid,str) else valid
+        if valid and any(row['duration'] not in valid for row in durations):raise HTTPException(400,"The selected engine does not support this production's shot durations")
+        settings=read_settings(project_id)
+        updated=json.loads(json.dumps(settings)) if settings else None
+        if updated:
+            updated['automation_enabled']=False
+            updated['spec'].update(video_model_key=body.video_model_key,lora_mode='none',lora_name='',lora_strength=1)
+        conn=mysql.connector.connect(**DB);cur=conn.cursor()
+        try:
+            cur.execute('UPDATE project_model_config SET video_model_key=%s WHERE project_id=%s',(body.video_model_key,project_id))
+            if updated:write_settings(project_id,updated)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            if settings:write_settings(project_id,settings)
+            raise
+        finally:cur.close();conn.close()
+        return {'video_model_key':body.video_model_key,'message':'Video engine saved for upcoming renders. Automation is paused and LoRA is set to None; existing clips remain available.'}
 
 @app.get('/video-options')
 def video_options():

@@ -58,8 +58,64 @@ class VideoRecoveryTests(unittest.TestCase):
             with patch.object(video.sys,'argv',['worker','film','--limit','2']),patch.object(video.mysql.connector,'connect',return_value=conn),patch.object(video,'read_settings',return_value=None),patch.object(video,'read_options',return_value={}),patch.object(video,'render_video') as render,patch.object(video,'record_video') as record,patch.object(video,'release_video_memory',side_effect=[RuntimeError('Free failed'),True]):
                 video.main()
             self.assertEqual(render.call_count,2);self.assertEqual(record.call_count,2)
+    def test_batch_stops_after_render_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            template=Path(folder)/'workflow.json';template.write_text('{}')
+            conn=Mock();cur=conn.cursor.return_value;cur.rowcount=1
+            cur.fetchone.return_value={'model_key':'ltx','workflow_template_path':str(template),'locked_duration_seconds':6}
+            cur.fetchall.return_value=[dict(id=i,shot_id=f'shot_{i}',duration_seconds=6,prompt='Action',video_prompt='Action',output_path=str(Path(folder)/f'{i}.mp4'),frame='frame.png',asset_id=i+10) for i in (1,2)]
+            with patch.object(video.sys,'argv',['worker','film','--limit','2']),patch.object(video.mysql.connector,'connect',return_value=conn),patch.object(video,'read_settings',return_value=None),patch.object(video,'read_options',return_value={}),patch.object(video,'render_video',side_effect=RuntimeError('CUDA out of memory')) as render:
+                with self.assertRaises(SystemExit):video.main()
+            self.assertEqual(render.call_count,1)
+    def test_ltx_text_encoder_uses_cpu(self):
+        workflow=video.patch_video(Path(__file__).resolve().parents[3]/'comfyworkflow'/'IMG-video_ltx2_5_i2v.json','frame.png','Action',6,'test')
+        self.assertEqual(workflow['398:393']['inputs']['device'],'cpu')
+    def test_atomic_submission_and_verified_download_survive_restart(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(video.requests,'get',return_value=self.response()):
+            output=Path(folder)/'clip.mp4';video.save_submission(output,prompt_id='saved',phase='submitted')
+            video.completed_video({'outputs':{'75':{'images':[{'filename':'clip.mp4'}]}}},output)
+            self.assertTrue(video.has_saved_video(output));output.write_bytes(b'changed');self.assertFalse(video.has_saved_video(output))
+    def test_unknown_post_result_is_not_submitted_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'clip.mp4';video.save_submission(output,phase='submitting',client_id='client')
+            with patch.object(video.requests,'post') as post:
+                with self.assertRaisesRegex(RuntimeError,'outcome unknown'):video.render_video(None,None,'Action',6,output,1)
+            post.assert_not_called()
+    def test_worker_rejects_busy_queue_before_upload(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(video,'submission_queue_status',return_value='other_work'),patch.object(video.requests,'post') as post:
+            with self.assertRaisesRegex(RuntimeError,'queue is occupied'):video.render_video(None,None,'Action',6,Path(folder)/'clip.mp4',1)
+            post.assert_not_called()
+    def test_transient_connection_failure_retries_only_status_checks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'clip.mp4';video.save_submission(output,prompt_id='saved')
+            record={'saved':{'outputs':{'75':{'images':[{'filename':'clip.mp4'}]}}}}
+            with patch.object(video.requests,'get',side_effect=[video.requests.ConnectionError('Disconnected'),self.response(record),self.response()]),patch.object(video.requests,'post') as post,patch.object(video.time,'sleep'):
+                video.render_video(None,None,'Action',6,output,1)
+            post.assert_not_called();self.assertTrue(video.has_saved_video(output))
+    def test_rejected_submission_is_safe_to_archive_for_retry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'clip.mp4';video.save_submission(output,phase='rejected',client_id='client',rejection='Invalid model input')
+            identifier,record=video.saved_video(output)
+            self.assertEqual(identifier,'client');self.assertEqual(record['status']['status_str'],'error')
+    def test_missing_submission_stops_waiting_without_resubmitting(self):
+        with tempfile.TemporaryDirectory() as folder,patch.dict(video.os.environ,{'COMFYUI_MISSING_GRACE_SECONDS':'0'}),patch.object(video.requests,'get',return_value=self.response({})),patch.object(video,'submission_queue_status',return_value='absent'),patch.object(video.requests,'post') as post:
+            output=Path(folder)/'clip.mp4';video.save_submission(output,prompt_id='saved')
+            with self.assertRaisesRegex(RuntimeError,'disappeared'):video.render_video(None,None,'Action',6,output,1)
+            post.assert_not_called()
+    def test_reset_lost_submission_archives_and_requeues(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(api,'ROOT',Path(folder)),patch.object(api,'active',False),patch.object(api,'read_settings',return_value=None),patch.object(api,'submission_queue_status',return_value='absent'):
+            output=Path(folder)/'film'/'clip.mp4';video.save_submission(output,prompt_id='saved')
+            with patch.object(api,'query',side_effect=[([{'project_id':'film'}],1),([{'output_path':str(output)}],1),([],1)]),patch.object(api,'saved_video',return_value=('saved',None)):
+                result=TestClient(api.app).post('/projects/film/jobs/1/reset-lost-video',json={'prompt_id':'saved','confirm':True})
+            self.assertEqual(result.status_code,200);self.assertEqual(result.json()['status'],'queued');self.assertFalse(Path(str(output)+'.comfy.json').exists());self.assertEqual(len(list(output.parent.glob('*.lost-*'))),1)
+    def test_reset_refuses_existing_comfy_work(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(api,'ROOT',Path(folder)),patch.object(api,'active',False),patch.object(api,'submission_queue_status',return_value='queued'):
+            output=Path(folder)/'film'/'clip.mp4';video.save_submission(output,prompt_id='saved')
+            with patch.object(api,'query',side_effect=[([{'project_id':'film'}],1),([{'output_path':str(output)}],1)]),patch.object(api,'saved_video',return_value=('saved',None)):
+                result=TestClient(api.app).post('/projects/film/jobs/1/reset-lost-video',json={'prompt_id':'saved','confirm':True})
+            self.assertEqual(result.status_code,409);self.assertTrue(Path(str(output)+'.comfy.json').exists())
     def test_recovery_does_not_reset_unknown_submission(self):
-        with tempfile.TemporaryDirectory() as folder,patch.object(api,'ROOT',Path(folder)),patch.object(api,'active',False),patch.object(api,'query',side_effect=[([{'project_id':'film'}],1),([{'id':1,'shot_id':'shot','output_path':str(Path(folder)/'film'/'clip.mp4'),'model_used':None}],1)]) as query,patch.object(api,'saved_video',return_value=('saved',None)):
+        with tempfile.TemporaryDirectory() as folder,patch.object(api,'ROOT',Path(folder)),patch.object(api,'active',False),patch.object(api,'query',side_effect=[([{'project_id':'film'}],1),([{'id':1,'shot_id':'shot','output_path':str(Path(folder)/'film'/'clip.mp4'),'model_used':None}],1)]) as query,patch.object(api,'saved_video',return_value=('saved',None)),patch.object(api,'submission_queue_status',return_value='rendering'):
             result=TestClient(api.app).post('/projects/film/jobs/1/recover-video',json={})
             self.assertEqual(result.status_code,200);self.assertEqual(result.json()['status'],'waiting');self.assertEqual(query.call_count,2)
     def test_recovery_completes_job_without_render_submission(self):
