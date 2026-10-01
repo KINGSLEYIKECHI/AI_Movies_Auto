@@ -1,0 +1,62 @@
+{
+  "name": "Film production \u2014 scheduled continuation",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "b224b3a6-24f2-4a95-9c8f-4a03f8eef5c7",
+      "name": "Every five minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "7b790916-c54d-43c3-9190-43dd36ca2be9",
+      "name": "Advance existing story",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://gateway:8000/projects/nigerian_mechanic_past_machine/workers/pipeline",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"limit\":1}",
+        "options": {}
+      },
+      "onError": "continueErrorOutput"
+    }
+  ],
+  "connections": {
+    "Every five minutes": {
+      "main": [
+        [
+          {
+            "node": "Advance existing story",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "tags": []
+}

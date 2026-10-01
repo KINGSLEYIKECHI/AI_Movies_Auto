@@ -1,0 +1,233 @@
+{
+  "name": "Film production controls",
+  "nodes": [
+    {
+      "id": "915b0653-b933-4175-918b-bcb58c276f78",
+      "name": "Queue stage webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "webhookId": "7f75b81b-6844-471f-befc-d7320a74b8c0",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "film/queue",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "bfcbf6c5-8d2f-447e-bd87-208b89e9f300",
+      "name": "Queue stage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ \"http://gateway:8000/projects/\" + encodeURIComponent($json.body.project_id) + \"/queue/\" + encodeURIComponent($json.body.stage) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "e3d46d73-eacf-4dd5-9612-3fc2c65dd87f",
+      "name": "Start worker webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        200
+      ],
+      "webhookId": "78a70a7f-0021-4e1f-adfd-94a5b7ef0ca8",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "film/worker",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "784decb5-d180-438e-9d1b-489125e3ccac",
+      "name": "Start worker",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ \"http://gateway:8000/projects/\" + encodeURIComponent($json.body.project_id) + \"/workers/\" + encodeURIComponent($json.body.worker) }}",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {limit: $json.body.limit ?? 1, episode_id: $json.body.episode_id ?? null} }}"
+      }
+    },
+    {
+      "id": "33bf4ba5-9292-4b70-b949-980f9280804f",
+      "name": "Check run webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ],
+      "webhookId": "5f4d6137-bfd4-4ea5-b30a-97808bd9a9b4",
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "film/run",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "0d0f7224-ec85-48e8-8d5a-5dc531e89242",
+      "name": "Check run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ \"http://gateway:8000/runs/\" + encodeURIComponent($json.query.run_id) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "62eafcca-56ef-4527-be64-077a5a40818b",
+      "name": "Review asset webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        600
+      ],
+      "webhookId": "046f1d52-2b47-44d6-b0d4-1608805de616",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "film/review",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "098dc098-2a29-4d4d-a281-226f883d5937",
+      "name": "Review asset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ \"http://gateway:8000/projects/\" + encodeURIComponent($json.body.project_id) + \"/assets/\" + encodeURIComponent($json.body.asset_id) + \"/review\" }}",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {status: $json.body.status} }}"
+      }
+    },
+    {
+      "id": "a84cb022-3a13-45ba-9c16-d63736c02b44",
+      "name": "List candidates webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        800
+      ],
+      "webhookId": "b42b9a52-7626-4382-b73b-9f30c2e53f03",
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "film/assets",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "04ec09a2-1e16-4653-846b-72948af67e37",
+      "name": "List candidates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        800
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ \"http://gateway:8000/projects/\" + encodeURIComponent($json.query.project_id) + \"/review-assets?status=candidate\" }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Queue stage webhook": {
+      "main": [
+        [
+          {
+            "node": "Queue stage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start worker webhook": {
+      "main": [
+        [
+          {
+            "node": "Start worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check run webhook": {
+      "main": [
+        [
+          {
+            "node": "Check run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review asset webhook": {
+      "main": [
+        [
+          {
+            "node": "Review asset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List candidates webhook": {
+      "main": [
+        [
+          {
+            "node": "List candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}

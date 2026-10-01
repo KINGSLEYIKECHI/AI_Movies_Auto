@@ -69,8 +69,8 @@ def record_candidate(cur, project_id, job, model, references):
                 "VALUES (%s,%s,%s,%s,%s,'candidate','openai_api',%s)",
                 (project_id, job["id"], job["job_type"], entity_id(cur, job), job["output_path"], model))
     asset_id = cur.lastrowid
-    for ref_id, _, role in references:
-        cur.execute("INSERT INTO job_asset_references (job_id,asset_id,reference_role) VALUES (%s,%s,%s)", (job["id"], ref_id, role))
+    for order, (ref_id, _, role) in enumerate(references, 1):
+        cur.execute("INSERT INTO job_asset_references (job_id,asset_id,reference_role,reference_order) VALUES (%s,%s,%s,%s)", (job["id"], ref_id, role, order))
     return asset_id
 
 
@@ -104,24 +104,31 @@ def main():
         cur.execute("SELECT pmc.image_model_key FROM project_model_config pmc JOIN model_registry mr ON mr.model_key=pmc.image_model_key WHERE pmc.project_id=%s AND mr.backend='openai_api'", (project_id,))
         row = cur.fetchone()
         if not row: raise SystemExit("Lock an OpenAI image model for this project first.")
-        model = row[0]; client = OpenAI(); processed = 0
+        model = row[0]; client = OpenAI(); processed = 0; failed = False
         while limit is None or processed < limit:
             job = next_job(cur, project_id)
             if not job: break
             references, blocker = references_for_shot(cur, project_id, job["shot_id"]) if job["job_type"] == "shot_image" else ([], None)
             if blocker:
                 print(f"BLOCKED job {job['id']}: {blocker}"); break
+            cur.execute("UPDATE jobs SET status='running' WHERE id=%s AND status='queued'", (job['id'],))
+            claimed = cur.rowcount
+            conn.commit()
+            if claimed != 1: continue
             try:
                 render(client, model, job, references)
                 cur.execute("UPDATE jobs SET status='done',model_used=%s,error=NULL WHERE id=%s", (model, job["id"]))
                 print(f"Created candidate asset {record_candidate(cur, project_id, job, model, references)} for job {job['id']}.")
                 conn.commit(); processed += 1
             except Exception as exc:
+                conn.rollback()
                 cur.execute("UPDATE jobs SET status='failed',model_used=%s,error=%s WHERE id=%s", (model, str(exc), job["id"]))
-                conn.commit(); print(f"FAILED job {job['id']}: {exc}"); processed += 1
+                conn.commit(); print(f"FAILED job {job['id']}: {exc}"); processed += 1; failed = True
+                break
         print(f"Processed {processed} job(s).")
     finally:
         cur.close(); conn.close()
+    if failed: raise SystemExit(1)
 
 
 if __name__ == "__main__": main()

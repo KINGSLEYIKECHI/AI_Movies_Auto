@@ -6,6 +6,9 @@
 # the review/control interface; GPU rendering remains on the local machine.
 services:
   gateway:
+    command: python -m uvicorn automation_api:app --host 0.0.0.0 --port 8000
+    ports:
+      - "127.0.0.1:8000:8000"
     environment:
       COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
     volumes:
@@ -13,21 +16,21 @@ services:
       - ./gateway/asset_review.py:/app/asset_review.py
       - ./gateway/run_comfyui_reference_jobs.py:/app/run_comfyui_reference_jobs.py
       - ../comfyworkflow:/app/workflows:ro
+      - ./gateway/automation_api.py:/app/automation_api.py:ro
+      - ./gateway/review.html:/app/review.html:ro
+      - ./gateway/run_comfyui_video_jobs.py:/app/run_comfyui_video_jobs.py:ro
+      - ./gateway/assemble_episode.py:/app/assemble_episode.py:ro
+      - ./gateway/advance_pipeline.py:/app/advance_pipeline.py:ro
 
   n8n:
     image: n8nio/n8n:latest
     container_name: glm_n8n
     restart: unless-stopped
     ports:
-      - "5678:5678"
+      - "127.0.0.1:5678:5678"
     environment:
-      DB_TYPE: mysqldb
-      DB_MYSQLDB_HOST: mysql
-      DB_MYSQLDB_PORT: 3306
-      DB_MYSQLDB_DATABASE: ${MYSQL_DATABASE:-glm_pipeline}
-      DB_MYSQLDB_USER: ${MYSQL_USER:-glm_user}
-      DB_MYSQLDB_PASSWORD: ${MYSQL_PASSWORD:-changeme}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      DB_TYPE: sqlite
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in db/.env}
       N8N_HOST: localhost
       N8N_PORT: 5678
       N8N_PROTOCOL: http

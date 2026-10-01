@@ -1,5 +1,10 @@
 # GLM AI Film Production Pipeline
 
+For the gateway API, n8n controls, approved-frame video generation, and episode
+assembly, follow [AUTOMATION_SETUP.md](AUTOMATION_SETUP.md). It includes backup
+and migration commands for the existing production database.
+
+
 Fully containerized: MySQL, phpMyAdmin, Ollama (GPU), and a "gateway"
 container running every Python script. Nothing runs as a native Windows
 process except Docker itself and your browser. Generated project files
@@ -10,27 +15,27 @@ volumes, so you can see progress live in Explorer.
 
 ```
 GLM-Firms/                              <- your working root (e.g. D:\AI\GLM-Firms)
-├── Modelfile                           Source of truth for the model's schema contract (edit here)
-├── GLM_Test_Prompt.txt                 One-shot test prompt (full bible + 1 episode)
-├── GLM_Test_Prompt_Small.txt           Tiny test prompt (project bible only)
-│
-└── db\                                 Run every command from THIS folder
-    ├── docker-compose.yml              Defines all 4 containers: mysql, phpmyadmin, ollama, gateway
-    ├── .env.example                    Copy to .env and fill in before first run
-    ├── .env                            (you create this — holds real passwords + host paths)
-    ├── init\
-    │   ├── 01_schema.sql                Core tables — auto-run by MySQL on first container startup only
-    │   ├── 02_continuity.sql            continuity_snapshots table — same, first-startup only
-    │   └── 03_fix_constraints.sql       Uniqueness fix for continuity_snapshots — apply manually, see below
-    └── gateway\                         Build context for the gateway container
-        ├── Dockerfile
-        ├── requirements.txt
-        ├── run_glm_prompt.py             Replaces Run_GLM_Test.ps1 — sends a prompt to GLM, validates, saves
-        ├── load_story_to_db.py           Loads a GLM output JSON into MySQL + creates the project folder tree
-        ├── generate_episode_prompt.py    Builds the next episode's prompt from what's already in MySQL
-        ├── GLM_Test_Prompt.txt           Baked into the image at build time
-        ├── GLM_Test_Prompt_Small.txt     Baked into the image at build time
-        └── outputs\                      Mounted back to host — GLM_Test_Output.json lands here, visible in Explorer
+â”œâ”€â”€ Modelfile                           Source of truth for the model's schema contract (edit here)
+â”œâ”€â”€ GLM_Test_Prompt.txt                 One-shot test prompt (full bible + 1 episode)
+â”œâ”€â”€ GLM_Test_Prompt_Small.txt           Tiny test prompt (project bible only)
+â”‚
+â””â”€â”€ db\                                 Run every command from THIS folder
+    â”œâ”€â”€ docker-compose.yml              Defines all 4 containers: mysql, phpmyadmin, ollama, gateway
+    â”œâ”€â”€ .env.example                    Copy to .env and fill in before first run
+    â”œâ”€â”€ .env                            (you create this â€” holds real passwords + host paths)
+    â”œâ”€â”€ init\
+    â”‚   â”œâ”€â”€ 01_schema.sql                Core tables â€” auto-run by MySQL on first container startup only
+    â”‚   â”œâ”€â”€ 02_continuity.sql            continuity_snapshots table â€” same, first-startup only
+    â”‚   â””â”€â”€ 03_fix_constraints.sql       Uniqueness fix for continuity_snapshots â€” apply manually, see below
+    â””â”€â”€ gateway\                         Build context for the gateway container
+        â”œâ”€â”€ Dockerfile
+        â”œâ”€â”€ requirements.txt
+        â”œâ”€â”€ run_glm_prompt.py             Replaces Run_GLM_Test.ps1 â€” sends a prompt to GLM, validates, saves
+        â”œâ”€â”€ load_story_to_db.py           Loads a GLM output JSON into MySQL + creates the project folder tree
+        â”œâ”€â”€ generate_episode_prompt.py    Builds the next episode's prompt from what's already in MySQL
+        â”œâ”€â”€ GLM_Test_Prompt.txt           Baked into the image at build time
+        â”œâ”€â”€ GLM_Test_Prompt_Small.txt     Baked into the image at build time
+        â””â”€â”€ outputs\                      Mounted back to host â€” GLM_Test_Output.json lands here, visible in Explorer
 ```
 
 **On editing prompts:** `GLM_Test_Prompt.txt` / `GLM_Test_Prompt_Small.txt`
@@ -38,21 +43,21 @@ inside `gateway\` are baked into the container image at build time. If you
 edit them, run `docker compose build gateway` to pick up the change (no
 rebuild needed for `GLM_Episode_Prompt.txt`, since that one is generated
 fresh each time by `generate_episode_prompt.py` and written straight into
-the running container's `outputs\` mount — see below).
+the running container's `outputs\` mount â€” see below).
 
 **On-disk project output**, mounted at `${PROJECTS_BASE_PATH_HOST}` from
 `.env` (e.g. `D:\AI_Movies`), created by `load_story_to_db.py`:
 ```
 D:\AI_Movies\PROJECT_ID\
-├── project.json
-├── story\{story_bible,characters,locations,wardrobe,props}.json
-├── episodes\EP_001\
-│   ├── episode.json
-│   ├── scenes\EP_001_SC_01.json ...
-│   ├── image_prompts\EP_001_SC_01_SH_01.txt ...
-│   └── video_prompts\EP_001_SC_01_SH_01.txt ...
-├── assets\{characters,locations,props}\   (ComfyUI output lands here later)
-└── final\                                  (assembled episode output lands here later)
+â”œâ”€â”€ project.json
+â”œâ”€â”€ story\{story_bible,characters,locations,wardrobe,props}.json
+â”œâ”€â”€ episodes\EP_001\
+â”‚   â”œâ”€â”€ episode.json
+â”‚   â”œâ”€â”€ scenes\EP_001_SC_01.json ...
+â”‚   â”œâ”€â”€ image_prompts\EP_001_SC_01_SH_01.txt ...
+â”‚   â””â”€â”€ video_prompts\EP_001_SC_01_SH_01.txt ...
+â”œâ”€â”€ assets\{characters,locations,props}\   (ComfyUI output lands here later)
+â””â”€â”€ final\                                  (assembled episode output lands here later)
 ```
 
 ## Prerequisite: verify GPU passthrough works
@@ -61,12 +66,12 @@ D:\AI_Movies\PROJECT_ID\
 docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
 ```
 Should print your RTX 5080's stats. If it errors, fix Docker Desktop's
-WSL2 GPU support before continuing — otherwise the containerized Ollama
+WSL2 GPU support before continuing â€” otherwise the containerized Ollama
 will silently run on CPU and be unusably slow.
 
 ## First-time setup (in order)
 
-**1. Stop native Windows Ollama** (system tray → quit, or stop the service)
+**1. Stop native Windows Ollama** (system tray â†’ quit, or stop the service)
 so the container can safely reuse its model files without a write conflict.
 
 **2. Configure environment** (from `db\`):
@@ -76,7 +81,7 @@ copy .env.example .env
 notepad .env
 ```
 Set real DB passwords, your actual `OLLAMA_MODELS_PATH` (your Windows
-`.ollama` folder — this is what avoids re-downloading `glm-4.7-flash`),
+`.ollama` folder â€” this is what avoids re-downloading `glm-4.7-flash`),
 and `PROJECTS_BASE_PATH_HOST`.
 
 **3. Build and start everything:**
@@ -89,7 +94,7 @@ container builds from `gateway\Dockerfile` and then just idles, waiting
 for you to run commands into it.
 
 **4. Create the GLM model inside the container** (only needed once, or
-whenever the root `Modelfile` changes — it's mounted directly into the
+whenever the root `Modelfile` changes â€” it's mounted directly into the
 container now, so there's nothing to keep in sync):
 ```powershell
 docker compose exec ollama ollama create glm-film-director -f /modelfile/Modelfile
@@ -98,7 +103,7 @@ docker compose exec ollama ollama create glm-film-director -f /modelfile/Modelfi
 **5. Open phpMyAdmin** at **http://localhost:8081** to confirm the database
 is reachable (log in with your `.env` credentials).
 
-## Everyday use — every command below is `docker compose exec gateway ...`
+## Everyday use â€” every command below is `docker compose exec gateway ...`
 
 **Test the model responds:**
 ```powershell
@@ -117,7 +122,7 @@ docker compose exec gateway python generate_episode_prompt.py PROJECT_ID EPISODE
 docker compose exec gateway python run_glm_prompt.py GLM_Episode_Prompt.txt
 docker compose exec gateway python load_story_to_db.py outputs/GLM_Test_Output.json PROJECT_ID
 ```
-Example — a 2-minute episode 2 of `ECHO_ENGINE_01`:
+Example â€” a 2-minute episode 2 of `ECHO_ENGINE_01`:
 ```powershell
 docker compose exec gateway python generate_episode_prompt.py ECHO_ENGINE_01 2 2
 docker compose exec gateway python run_glm_prompt.py GLM_Episode_Prompt.txt
@@ -132,11 +137,11 @@ Repeat with the next episode number for as many episodes as the series needs.
 
 ## Re-running commands safely
 
-- **Episode generation is safe to re-run** for the same episode number —
+- **Episode generation is safe to re-run** for the same episode number â€”
   `ON DUPLICATE KEY UPDATE` overwrites that episode's rows (and its
   continuity snapshot) instead of duplicating them.
 - **The full-bible prompt (`GLM_Test_Prompt.txt`) is NOT guaranteed
-  idempotent.** It doesn't pin a `project_id` — GLM invents one from the
+  idempotent.** It doesn't pin a `project_id` â€” GLM invents one from the
   concept text each time, and isn't guaranteed to pick the same one twice.
   Re-running it can create a second, separate project instead of updating
   the first. Treat it as a one-time bootstrap per new story concept, not
@@ -144,13 +149,13 @@ Repeat with the next episode number for as many episodes as the series needs.
 - **Entity IDs (`character_id`, `location_id`, `episode_id`, etc.) are
   automatically scoped to their project** before hitting the database
   (e.g. `CHAR_001` becomes `ECHO_ENGINE_01__CHAR_001`), so two different
-  projects generating the same raw ID — which GLM will do routinely,
-  since it numbers fresh from 001 every time — can never collide or
+  projects generating the same raw ID â€” which GLM will do routinely,
+  since it numbers fresh from 001 every time â€” can never collide or
   overwrite each other. This happens transparently; you never need to
   type the scoped form yourself. Your on-disk filenames stay short and
   unscoped, since that collision risk only exists in the shared database.
 - **Passing the wrong `PROJECT_ID`** to `load_story_to_db.py` will still
-  succeed and attach that episode to the wrong project's episode list —
+  succeed and attach that episode to the wrong project's episode list â€”
   the scoping fix prevents data *corruption* across projects, but doesn't
   catch a simple wrong-argument mistake. Double check the ID before running.
 
@@ -167,7 +172,7 @@ This wipes everything (database + generated project files) and reconfigures
 the pipeline so Qwen is what every command uses by default, instead of GLM.
 
 **Your host-native Ollama installation and the `film-director-qwen` model
-are untouched by any of this** — they live outside Docker entirely, so
+are untouched by any of this** â€” they live outside Docker entirely, so
 `docker compose down -v` never affects them. You do NOT need to re-run
 `ollama create film-director-qwen -f Modelfile.qwen` unless you've also
 separately reset your host's Ollama data.
@@ -183,7 +188,7 @@ Remove-Item -Recurse -Force "D:\AI_Movies\*"
 Remove-Item -Recurse -Force "D:\AI\GLM-Firms\db\gateway\outputs\*"
 ```
 
-**3. Set Qwen as the default in `.env`** — open `db\.env` and change:
+**3. Set Qwen as the default in `.env`** â€” open `db\.env` and change:
 ```
 MODEL_NAME=film-director-qwen
 OLLAMA_HOST=host.docker.internal:11434
@@ -192,13 +197,13 @@ Leave every other line (`MYSQL_*`, `OLLAMA_MODELS_PATH`, `PROJECTS_BASE_PATH_HOS
 
 **4. Start only what Qwen actually needs.** Since Qwen runs on your host's
 native Ollama, not the containerized one, you don't need the `ollama`
-container running at all for this — skipping it avoids two separate
+container running at all for this â€” skipping it avoids two separate
 processes competing for your RTX 5080's 16GB VRAM at once:
 ```powershell
 docker compose up -d --build mysql phpmyadmin gateway
 ```
 (If you want the containerized GLM setup available again later too, run
-`docker compose up -d ollama` separately at that point — just not at the
+`docker compose up -d ollama` separately at that point â€” just not at the
 same time you're actively generating with Qwen, to avoid GPU contention.)
 
 **5. Confirm Qwen responds correctly:**
@@ -212,7 +217,7 @@ Should complete with `Schema check passed` and a `project` object in the output.
 docker compose exec gateway python run_glm_prompt.py GLM_Test_Prompt.txt
 docker compose exec gateway python load_story_to_db.py outputs/GLM_Test_Output.json
 ```
-Note the `project_id` it reports — that's what you'll use for every
+Note the `project_id` it reports â€” that's what you'll use for every
 `generate_episode_prompt.py` / `run_episode_batch.py` call from here on.
 
 
@@ -220,7 +225,7 @@ Note the `project_id` it reports — that's what you'll use for every
 `Run_GLM_Test.ps1`, `Run_GLM_Test_Streaming.ps1`, and running Python/Ollama
 directly on Windows are superseded by the gateway container. Keep the
 `.ps1` files around only if you want a quick host-side fallback for
-debugging — they still work against the container's Ollama by pointing
+debugging â€” they still work against the container's Ollama by pointing
 at `http://localhost:11434` (since that port is still published), but
 they are not part of the normal workflow anymore.
 
@@ -229,8 +234,8 @@ they are not part of the normal workflow anymore.
 ```powershell
 docker compose stop        # stop all containers, keep all data
 docker compose down        # stop and remove containers, keep the mysql data volume
-docker compose down -v     # WARNING: also deletes the MySQL data volume — full reset
+docker compose down -v     # WARNING: also deletes the MySQL data volume â€” full reset
 ```
 Your Ollama models and `D:\AI_Movies` project files are never deleted by
-any of the above — they live outside Docker's managed volumes, on your
+any of the above â€” they live outside Docker's managed volumes, on your
 own filesystem/folder mounts.

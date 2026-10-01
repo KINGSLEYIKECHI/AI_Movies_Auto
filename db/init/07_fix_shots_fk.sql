@@ -1,10 +1,3 @@
--- Fix: shots.scene_id can now legitimately reference EITHER scenes.scene_id
--- (the legacy nested EPISODE_FULL path) OR scene_plan.scene_id (the new
--- per-scene SHOT_PLAN path). A foreign key can only point at one table, so
--- drop the constraint entirely — correctness here is guaranteed at the
--- application level (scoped IDs, scene_plan lookups) instead.
---
--- Apply manually against an already-running container:
---   docker exec -i glm_mysql mysql -u root -p glm_pipeline < db/init/07_fix_shots_fk.sql
-
-ALTER TABLE shots DROP FOREIGN KEY shots_ibfk_1;
+-- Fresh schema already omits this legacy FK; upgrade only when present.
+SET @ddl = IF((SELECT COUNT(*) FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND table_name='shots' AND constraint_name='shots_ibfk_1' AND constraint_type='FOREIGN KEY')>0, 'ALTER TABLE shots DROP FOREIGN KEY shots_ibfk_1', 'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;

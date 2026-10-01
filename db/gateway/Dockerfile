@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -15,9 +16,12 @@ COPY enqueue_asset_jobs.py .
 COPY run_image_jobs.py .
 COPY run_openai_reference_jobs.py .
 COPY asset_review.py .
+COPY automation_api.py run_comfyui_reference_jobs.py run_comfyui_video_jobs.py assemble_episode.py ./
+COPY review.html advance_pipeline.py ./
 COPY run_glm_prompt.py .
 COPY run_episode_batch.py .
 COPY GLM_Test_Prompt.txt .
 COPY GLM_Test_Prompt_Small.txt .
 
 RUN mkdir -p /app/outputs
+CMD ["python", "-m", "uvicorn", "automation_api:app", "--host", "0.0.0.0", "--port", "8000"]

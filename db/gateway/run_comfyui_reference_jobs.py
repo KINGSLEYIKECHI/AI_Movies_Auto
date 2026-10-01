@@ -85,10 +85,14 @@ def main():
     limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else None
     conn = mysql.connector.connect(**DB); cur = conn.cursor()
     try:
-        model, template = model_config(cur, project_id); processed = 0
+        model, template = model_config(cur, project_id); processed = 0; failed = False
         while limit is None or processed < limit:
             job = next_job(cur, project_id, retry)
             if not job: break
+            cur.execute("UPDATE jobs SET status='running' WHERE id=%s AND status IN ('queued','failed')", (job['id'],))
+            claimed = cur.rowcount
+            conn.commit()
+            if claimed != 1: continue
             try:
                 workflow = patch_flux2_workflow(template, job["prompt"])
                 response = requests.post(f"{COMFYUI_URL}/prompt", json={"prompt": workflow, "client_id": str(uuid.uuid4())}, timeout=30)
@@ -99,10 +103,16 @@ def main():
                 print(f"Created candidate asset {candidate(cur, project_id, job, model)} for job {job['id']}.")
                 conn.commit()
             except Exception as exc:
-                cur.execute("UPDATE jobs SET status='failed',model_used=%s,error=%s WHERE id=%s", (model,str(exc),job["id"])); conn.commit(); print(f"FAILED job {job['id']}: {exc}")
+                conn.rollback()
+                cur.execute("UPDATE jobs SET status='failed',model_used=%s,error=%s WHERE id=%s", (model,str(exc),job["id"])); conn.commit(); failed = True; print(f"FAILED job {job['id']}: {exc}")
             processed += 1
+            if job and retry:
+                # Avoid selecting the same failed job indefinitely in retry mode.
+                cur.execute("SELECT status FROM jobs WHERE id=%s", (job['id'],))
+                if cur.fetchone()[0] == 'failed': failed = True; break
     finally:
         cur.close(); conn.close()
+    if failed: raise SystemExit(1)
 
 
 if __name__ == "__main__": main()

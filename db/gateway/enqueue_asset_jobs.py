@@ -5,7 +5,7 @@ entity appears), then per-shot images, then per-shot video.
 
 Video jobs are HARD-GATED: enqueue_shot_videos refuses to queue ANY video
 job for the project until EVERY shot image in that entire project is
-'done' — not just the current episode/scene. This is deliberate: catching
+'done' â€” not just the current episode/scene. This is deliberate: catching
 a bad reference or shot image before committing GPU time to video is the
 whole point of the manual-review checkpoint this creates.
 
@@ -46,7 +46,7 @@ def _job_exists(cursor, project_id, job_type, entity_col, entity_id):
 
 def enqueue_references(cursor, project_id: str) -> int:
     """One reference-image job per character/location/prop that doesn't
-    already have one — this is the 'lock the look once' mechanism."""
+    already have one â€” this is the 'lock the look once' mechanism."""
     count = 0
 
     cursor.execute("SELECT character_id, name, appearance FROM characters WHERE project_id = %s", (project_id,))
@@ -132,7 +132,7 @@ def shot_image_completion(cursor, project_id: str):
     all_shots = {row[0] for row in cursor.fetchall()}
 
     cursor.execute(
-        "SELECT shot_id FROM jobs WHERE project_id = %s AND job_type = 'shot_image' AND status = 'done'",
+        "SELECT entity_id FROM asset_records WHERE project_id = %s AND asset_type = 'shot_image' AND status = 'approved'",
         (project_id,),
     )
     done_shots = {row[0] for row in cursor.fetchall()}
@@ -142,14 +142,14 @@ def shot_image_completion(cursor, project_id: str):
 
 def enqueue_shot_videos(cursor, project_id: str) -> int:
     """THE GATE: refuses to queue any video job until every shot image in
-    the whole project is done — not just the current scene/episode."""
+    the whole project is approved â€” not just the current scene/episode."""
     total, done = shot_image_completion(cursor, project_id)
     if total == 0:
-        print(f"No shots found for '{project_id}' at all — run enqueue_shot_images first.")
+        print(f"No shots found for '{project_id}' at all â€” run enqueue_shot_images first.")
         return 0
     if done < total:
-        print(f"BLOCKED: {done}/{total} shot images done for '{project_id}'. "
-              f"All shot images must complete before ANY video job can be queued.")
+        print(f"BLOCKED: {done}/{total} shot images approved for '{project_id}'. "
+              f"All shot images must be approved before ANY video job can be queued.")
         return 0
 
     cursor.execute(
@@ -157,7 +157,8 @@ def enqueue_shot_videos(cursor, project_id: str) -> int:
         SELECT s.shot_id, s.scene_id, s.video_prompt, j.output_path
         FROM shots s
         JOIN scene_plan sp ON sp.scene_id = s.scene_id
-        JOIN jobs j ON j.shot_id = s.shot_id AND j.job_type = 'shot_image'
+        JOIN asset_records j ON j.entity_id = s.shot_id AND j.asset_type = 'shot_image'
+          AND j.status = 'approved' AND j.project_id = sp.project_id
         WHERE sp.project_id = %s
         """,
         (project_id,),
@@ -170,7 +171,7 @@ def enqueue_shot_videos(cursor, project_id: str) -> int:
         short_shot = shot_id.split("__")[-1]
         out_path = str(BASE_PATH / project_id / "episodes" / episode_id.split("__")[-1] / "clips" / f"{short_shot}.mp4")
         # source_image_path is embedded in the prompt field so the (future)
-        # broker knows which completed image to feed in for image-to-video —
+        # broker knows which completed image to feed in for image-to-video â€”
         # the actual FK link is job_type='shot_image' + shot_id, this is
         # just a convenience for a quick read.
         prompt = f"[source_image: {source_image_path}] {video_prompt}"
@@ -181,7 +182,7 @@ def enqueue_shot_videos(cursor, project_id: str) -> int:
         )
         count += 1
 
-    print(f"All {total} shot images done — queued {count} video jobs.")
+    print(f"All {total} shot images approved â€” queued {count} video jobs.")
     return count
 
 
@@ -201,7 +202,7 @@ def print_status(cursor, project_id: str):
 
     total, done = shot_image_completion(cursor, project_id)
     print(f"\nShot images: {done}/{total} done."
-          + (" Video jobs may be queued." if total and done == total else " Video jobs BLOCKED until all shot images are done."))
+          + (" Video jobs may be queued." if total and done == total else " Video jobs BLOCKED until all shot images are approved."))
 
 
 def main():

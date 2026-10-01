@@ -5,7 +5,7 @@ scene's ending state, or the previous episode's actual ending if this is
 scene 1), and only the characters/locations relevant to this specific scene.
 
 Duration is read from the project's LOCKED model config (set once via
-set_project_models.py) — never computed per call, never left to the
+set_project_models.py) â€” never computed per call, never left to the
 model's judgment. This is what guarantees every shot in a project uses
 the same duration and the same video model, with no drift partway through.
 
@@ -28,7 +28,7 @@ import mysql.connector
 
 from generate_episode_prompt import DB_CONFIG, fetch_bibles
 
-SHOTS_PER_EPISODE = 16  # 4 scenes x 4 shots, fixed structure — sized for ~1-3 min episodes
+SHOTS_PER_EPISODE = 16  # 4 scenes x 4 shots, fixed structure â€” sized for ~1-3 min episodes
 
 
 def fetch_locked_config(cursor, project_id: str):
@@ -84,7 +84,7 @@ def fetch_this_scene(cursor, episode_id: str, scene_number: int):
 
 def fetch_previous_episode_ending(cursor, project_id: str, episode_number: int):
     """Find the previous episode's LAST scene's ending_state, chaining
-    through scene_continuity directly — continuity_snapshots is only
+    through scene_continuity directly â€” continuity_snapshots is only
     populated by the old full-episode-in-one-call path, never by this
     per-scene flow, so it can't be relied on here."""
     if episode_number <= 1:
@@ -119,19 +119,19 @@ def fetch_continuity_pointer(cursor, project_id: str, episode_id: str, episode_n
         row = cursor.fetchone()
         if row:
             return f"(from the previous scene in this episode) {row[0]}"
-        # Previous scene in THIS episode was skipped/never generated — fall
+        # Previous scene in THIS episode was skipped/never generated â€” fall
         # through to whatever the last available continuity point is,
         # rather than silently claiming "no prior continuity" when there
         # actually is history, just with a gap in it.
         print(f"WARNING: scene {scene_number - 1} of this episode has no recorded "
-              f"ending_state (likely skipped) — continuity pointer will fall back "
+              f"ending_state (likely skipped) â€” continuity pointer will fall back "
               f"to the previous episode's ending instead, which may be less precise.")
 
     prev_ending = fetch_previous_episode_ending(cursor, project_id, episode_number)
     if prev_ending:
         return f"(from the end of the previous episode) {prev_ending}"
 
-    return "This is the very first scene of the series — no prior continuity."
+    return "This is the very first scene of the series â€” no prior continuity."
 
 
 def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str:
@@ -142,7 +142,7 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str
         config = fetch_locked_config(cursor, project_id)
         per_shot_seconds = config["duration_seconds"]
 
-        # Need the episode_id string — derive it from any scene_plan row for this episode/number.
+        # Need the episode_id string â€” derive it from any scene_plan row for this episode/number.
         cursor.execute(
             "SELECT episode_id FROM scene_plan WHERE project_id = %s AND scene_number = 1 "
             "AND episode_id LIKE %s LIMIT 1",
@@ -175,7 +175,7 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str
     parts.append(f"Project: {project_id}, Episode {episode_number}, Scene {scene_number} "
                  f"(scene_id: {this_scene['scene_id']}).")
     parts.append("")
-    parts.append("FULL EPISODE MAP (all 20 scenes, for context — you are only generating shots for ONE of these):")
+    parts.append("FULL EPISODE MAP (all 4 scenes, for context â€” you are only generating shots for ONE of these):")
     parts.append(json.dumps(full_map, ensure_ascii=False))
     parts.append("")
     parts.append(f"THIS SCENE'S BEAT: {this_scene['beat']}")
@@ -194,13 +194,13 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str
     parts.append(
         f"TASK: Generate exactly 4 shots for scene_id \"{this_scene['scene_id']}\" "
         f"(shot_id format: {this_scene['scene_id']}_SH_01 through {this_scene['scene_id']}_SH_04). "
-        f"Every shot's duration_seconds MUST be exactly {per_shot_seconds} — this is fixed by the "
+        f"Every shot's duration_seconds MUST be exactly {per_shot_seconds} â€” this is fixed by the "
         f"production pipeline, not your decision. Also return scene_ending_state summarizing how "
         f"this scene ends, for the next scene's continuity."
     )
     parts.append("")
     parts.append(
-        "Dialogue must be specific to what's happening in each individual shot — do not repeat the "
+        "Dialogue must be specific to what's happening in each individual shot â€” do not repeat the "
         "same or near-identical line across shots or scenes."
     )
     parts.append("")
