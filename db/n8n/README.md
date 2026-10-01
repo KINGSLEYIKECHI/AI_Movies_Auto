@@ -38,3 +38,20 @@ It calls `/automation/tick` every five minutes for productions enabled in the st
 and respects prompt approval and stage reviews. The gateway already runs its own
 ten-second timer. The workflow is inactive by default; enabled production permits
 paid image generation. New productions are planned in the studio interface.
+
+
+### Automatic production and manual image references
+
+In the Studio, approve prompts and start automatic production once. The scheduler processes the queued assets in order and pauses for your selected stage reviews. With “Review each stage,” accept the canonical references in Review, then automation continues through shot images, videos and exports. You do not need to render each queued image manually.
+
+Each shot image automatically receives the accepted images for the characters in its shot plan and the location in its scene plan. Missing accepted references keep the shot queued. The OpenAI image worker sends image numbers, character names, entity IDs and location roles with the prompt to preserve context.
+
+For manual changes, select a shot under Prompts and open “Reference images & render inputs.” Planned characters and locations appear as automatically included thumbnails. Select other accepted character, location, prop or shot images for additional context, or upload optional identity/style/composition images. Save render inputs for later automation, or save and render that job. Edit the story/shot plan to change the required cast; extra references do not replace the planned cast. Video generation uses the accepted shot image as its starting frame.
+
+After updating these files on your build machine, run from the `db` folder:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.automation.yml up -d --build gateway
+```
+
+Open the Studio at `http://localhost:8000/review` and refresh the browser.

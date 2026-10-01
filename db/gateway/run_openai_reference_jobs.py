@@ -15,6 +15,7 @@ from pathlib import Path
 import mysql.connector
 from dotenv import load_dotenv
 from asset_control import read_options, additional_references
+from shot_references import context, selected_assets, render_references, deduplicate
 
 load_dotenv(Path(__file__).parent / ".env")
 DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_PORT", "3306")),
@@ -39,23 +40,12 @@ def approved(cur, project_id, asset_type, entity_id):
     return cur.fetchone()
 
 
-def references_for_shot(cur, project_id, shot_id):
-    cur.execute("SELECT scene_id,character_ids FROM shots WHERE shot_id=%s", (shot_id,))
-    scene_id, characters = cur.fetchone()
-    references = []
-    for character_id in json.loads(characters) if characters else []:
-        asset = approved(cur, project_id, "character_reference", character_id)
-        if not asset:
-            return [], f"character reference {character_id} is not approved"
-        references.append((asset[0], asset[1], "character_identity"))
-    cur.execute("SELECT location_id FROM scene_plan WHERE scene_id=%s", (scene_id,))
-    location = cur.fetchone()
-    if location and location[0]:
-        asset = approved(cur, project_id, "location_reference", location[0])
-        if not asset:
-            return [], f"location reference {location[0]} is not approved"
-        references.append((asset[0], asset[1], "location"))
-    return (references, None) if references else ([], "no approved references")
+def references_for_shot(rows, project_id, shot_id):
+    data = context(rows, project_id, shot_id)
+    if data['missing_references']:
+        return [], '; '.join(item['entity_id'] + ': ' + item['reason'] for item in data['missing_references'])
+    references = render_references(data['automatic_references'])
+    return (references, None) if references else ([], 'no approved references')
 
 
 def entity_id(cur, job):
@@ -73,6 +63,7 @@ def record_candidate(cur, project_id, job, model, references):
     asset_id = cur.lastrowid
     for order, (ref_id, _, role) in enumerate(references, 1):
         if ref_id is None: continue
+        role = role.split(':', 1)[0]
         if role not in {'character_identity', 'wardrobe', 'location', 'prop', 'previous_shot', 'style'}: role = 'style'
         cur.execute("INSERT INTO job_asset_references (job_id,asset_id,reference_role,reference_order) VALUES (%s,%s,%s,%s)", (job["id"], ref_id, role, order))
     return asset_id
@@ -90,7 +81,7 @@ def render(client, model, job, references):
                 if not path.exists():
                     raise RuntimeError(f"Approved reference file missing: {path}")
                 files.append(open(path, "rb"))
-            roles = "; ".join(f"Image {i + 1}: {role.replace('_', ' ')}" for i, (_, _, role) in enumerate(references))
+            roles = "; ".join(f"Image {i + 1}: {role.split(':', 1)[0].replace('_', ' ') + (': ' + role.split(':', 1)[1].strip() if ':' in role else '')}" for i, (_, _, role) in enumerate(references))
             prompt = f"Follow the instructions using these input images. {roles}. Preserve details unless the instructions ask to change them.\n\nINSTRUCTIONS:\n{job['prompt']}"
             response = client.images.edit(model=model, image=files, prompt=prompt, size="1024x1536", quality="high", output_format="png")
         finally:
@@ -107,7 +98,11 @@ def main():
     stage = sys.argv[sys.argv.index('--stage') + 1] if '--stage' in sys.argv else None
     if stage not in {None,'references','shot-images'}:raise SystemExit('Unknown image stage')
     if not os.getenv("OPENAI_API_KEY"): raise SystemExit("OPENAI_API_KEY is required.")
-    conn = mysql.connector.connect(**DB); cur = conn.cursor()
+    conn = mysql.connector.connect(**DB); cur = conn.cursor(buffered=True)
+    reference_cursor = conn.cursor(dictionary=True, buffered=True)
+    def rows(sql, params):
+        reference_cursor.execute(sql, params)
+        return reference_cursor.fetchall()
     try:
         cur.execute("SELECT pmc.image_model_key FROM project_model_config pmc JOIN model_registry mr ON mr.model_key=pmc.image_model_key WHERE pmc.project_id=%s AND mr.backend='openai_api'", (project_id,))
         row = cur.fetchone()
@@ -116,7 +111,7 @@ def main():
         while limit is None or processed < limit:
             job = next_job(cur, project_id, job_id, stage)
             if not job: break
-            references, blocker = references_for_shot(cur, project_id, job["shot_id"]) if job["job_type"] == "shot_image" else ([], None)
+            references, blocker = references_for_shot(rows, project_id, job["shot_id"]) if job["job_type"] == "shot_image" else ([], None)
             if blocker:
                 print(f"BLOCKED job {job['id']}: {blocker}"); break
             cur.execute("UPDATE jobs SET status='running' WHERE id=%s AND status='queued'", (job['id'],))
@@ -125,7 +120,8 @@ def main():
             if claimed != 1: continue
             try:
                 options = read_options(project_id, job['output_path'])
-                references = additional_references(cur, project_id, options) + references
+                extras = render_references(selected_assets(rows, project_id, options.get('reference_asset_ids', []))) if options.get('reference_asset_ids') else []
+                references = deduplicate(references + extras + additional_references(cur, project_id, options))
                 selected_model = options.get('image_model_key') or model
                 render(client, selected_model, job, references)
                 cur.execute("UPDATE jobs SET status='done',model_used=%s,error=NULL WHERE id=%s", (selected_model, job["id"]))
@@ -138,7 +134,7 @@ def main():
                 break
         print(f"Processed {processed} job(s).")
     finally:
-        cur.close(); conn.close()
+        reference_cursor.close(); cur.close(); conn.close()
     if failed: raise SystemExit(1)
 
 

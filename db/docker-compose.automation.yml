@@ -24,6 +24,7 @@ services:
       - ./gateway/production_control.py:/app/production_control.py:ro
       - ./gateway/plan_production.py:/app/plan_production.py:ro
       - ./gateway/asset_control.py:/app/asset_control.py:ro
+      - ./gateway/shot_references.py:/app/shot_references.py:ro
       - ./gateway/project_cleanup.py:/app/project_cleanup.py:ro
       - ./gateway/run_comfyui_video_jobs.py:/app/run_comfyui_video_jobs.py:ro
       - ./gateway/assemble_episode.py:/app/assemble_episode.py:ro

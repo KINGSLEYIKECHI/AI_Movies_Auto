@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 import mysql.connector
 from asset_control import IMAGE_TYPES, MAX_UPLOAD_BYTES, UNRESOLVED_REJECTIONS, project_folder, scoped_file, save_upload, upload_reference, write_options, read_options
 from project_cleanup import delete_project, recover_cleanup
+from shot_references import context as shot_context, library as reference_library, selected_assets
 
 DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_PORT", "3306")),
       "user": os.getenv("MYSQL_USER", "glm_user"), "password": os.getenv("MYSQL_PASSWORD", "changeme"),
@@ -36,6 +37,17 @@ class AssetRevision(BaseModel):
     use_source_image: bool = False
     reference_upload_ids: list[str] = Field(default_factory=list, max_length=3)
     image_model_key: str | None = None
+    reference_asset_ids: list[int] = Field(default_factory=list,max_length=24)
+
+def context_rows(sql,params):return query(sql,params)[0]
+
+@app.get('/projects/{project_id}/reference-library')
+def project_reference_library(project_id:str,shot_id:str|None=None):
+    project(project_id)
+    try:
+        if shot_id:return shot_context(context_rows,project_id,shot_id,ROOT)
+        return {'assets':reference_library(context_rows,project_id,ROOT),'automatic_references':[],'missing_references':[]}
+    except ValueError as exc:raise HTTPException(409,str(exc))
 
 class ReferenceUpload(BaseModel):
     name: str = Field(max_length=200)
@@ -239,9 +251,12 @@ def regenerate(project_id: str, asset_id: int, body: AssetRevision = AssetRevisi
         asset = asset_edit_details(project_id, asset_id)
         kind = asset['asset_type']
         if kind not in IMAGE_TYPES | {'shot_video'}: raise HTTPException(400, 'Use Assemble another cut for final exports; this asset type has no render worker')
-        if kind == 'shot_video' and (body.use_source_image or body.image_model_key): raise HTTPException(400, 'Videos are regenerated from a starting image and video prompt; GPT image editing applies to images')
+        if kind == 'shot_video' and (body.use_source_image or body.image_model_key or body.reference_asset_ids): raise HTTPException(400, 'Videos are regenerated from a starting image and video prompt; GPT image editing applies to images')
         if kind == 'shot_video' and len(body.reference_upload_ids) > 1: raise HTTPException(400, 'Choose one optional starting frame for video')
-        options = {'source_asset_id': asset_id, 'use_source_image': body.use_source_image, 'reference_upload_ids': body.reference_upload_ids, 'image_model_key': body.image_model_key}
+        options = {'source_asset_id': asset_id, 'use_source_image': body.use_source_image, 'reference_upload_ids': body.reference_upload_ids, 'reference_asset_ids': body.reference_asset_ids, 'image_model_key': body.image_model_key}
+        if body.reference_asset_ids:
+            try: selected_assets(context_rows, project_id, body.reference_asset_ids, ROOT)
+            except ValueError as exc: raise HTTPException(400, str(exc))
         for identifier in body.reference_upload_ids:
             try: upload_reference(project_id, identifier, ROOT)
             except ValueError as exc: raise HTTPException(400, str(exc))
@@ -494,14 +509,17 @@ def edit_job_options(project_id: str, job_id: int, body: AssetRevision):
         if job['job_type'] not in IMAGE_TYPES | {'shot_video'}: raise HTTPException(400, 'Unsupported render type')
         options = read_options(project_id, job['output_path'], ROOT)
         if body.use_source_image and not options.get('source_asset_id'): raise HTTPException(400, 'This job has no original image to edit')
-        if job['job_type'] == 'shot_video' and (body.use_source_image or body.image_model_key or len(body.reference_upload_ids) > 1): raise HTTPException(400, 'Videos accept one optional starting frame and use the project video engine')
+        if job['job_type'] == 'shot_video' and (body.use_source_image or body.image_model_key or body.reference_asset_ids or len(body.reference_upload_ids) > 1): raise HTTPException(400, 'Videos accept one optional starting frame and use the project video engine')
+        if body.reference_asset_ids:
+            try: selected_assets(context_rows, project_id, body.reference_asset_ids, ROOT)
+            except ValueError as exc: raise HTTPException(400, str(exc))
         for identifier in body.reference_upload_ids:
             try: upload_reference(project_id, identifier, ROOT)
             except ValueError as exc: raise HTTPException(400, str(exc))
         if body.image_model_key:
             models, _ = query("SELECT model_key FROM model_registry WHERE model_key=%s AND model_type='image' AND backend='openai_api'", (body.image_model_key,))
             if not models: raise HTTPException(400, 'Choose a registered OpenAI image model')
-        options.update(use_source_image=body.use_source_image, reference_upload_ids=body.reference_upload_ids, image_model_key=body.image_model_key)
+        options.update(use_source_image=body.use_source_image, reference_upload_ids=body.reference_upload_ids, reference_asset_ids=body.reference_asset_ids, image_model_key=body.image_model_key)
         pause_for_change(project_id)
         write_options(project_id, job['output_path'], options, ROOT)
         return options

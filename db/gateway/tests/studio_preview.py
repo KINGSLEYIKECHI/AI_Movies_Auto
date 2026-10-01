@@ -25,6 +25,11 @@ def jobs(project):return [{'id':1,'job_type':'character_reference','scene_id':No
 
 def query(sql,params=()):
  p=params[0] if params else 'preview_workshop'
+ if sql.startswith('SELECT s.shot_id,s.scene_id,s.character_ids'):
+  return [dict(shot_id=params[1],scene_id=p+'__EP_001_SC_01',character_ids='["CHAR_001","CHAR_002"]',location_id='LOC_001')],1
+ if sql.startswith('SELECT a.id,a.asset_type'):
+  return [dict(id=i,asset_type=kind,entity_id=entity,name=name,output_path=str(image_path),generation_model='Fixture model') for i,kind,entity,name in [(6,'character_reference','CHAR_001','Ada'),(7,'character_reference','CHAR_002','Bayo'),(8,'location_reference','LOC_001','Workshop'),(9,'character_reference','CHAR_003','Kola')]],4
+
  if sql.startswith('SELECT project_id FROM projects WHERE'):return ([projects[p]] if p in projects else [],1)
  if sql.startswith('SELECT project_id FROM projects ORDER'):return (list(projects.values()),len(projects))
  if sql.startswith('SELECT status,prompt FROM jobs'):
