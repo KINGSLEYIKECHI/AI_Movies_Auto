@@ -24,7 +24,7 @@ import mysql.connector
 from generate_episode_prompt import DB_CONFIG, fetch_bibles, fetch_episode_outline
 
 
-def build_prompt(project_id: str, episode_number: int) -> str:
+def build_prompt(project_id: str, episode_number: int, scene_count: int = 4) -> str:
     conn = mysql.connector.connect(**DB_CONFIG)
     cursor = conn.cursor()
     try:
@@ -57,9 +57,9 @@ def build_prompt(project_id: str, episode_number: int) -> str:
     parts.append(json.dumps(bibles["locations"], ensure_ascii=False))
     parts.append("")
     parts.append(
-        f"TASK: Produce exactly 4 scene_plan entries for episode {outline['episode_id']} "
-        f"(scene_id format: {outline['episode_id']}_SC_01 through {outline['episode_id']}_SC_04). "
-        "Cover the episode summary above with real narrative pacing across the 4 scenes."
+        f"TASK: Produce exactly {scene_count} scene_plan entries for episode {outline['episode_id']} "
+        f"(scene_id format: {outline['episode_id']}_SC_01 through {outline['episode_id']}_SC_{scene_count:02d}). "
+        f"Cover the episode summary above with real narrative pacing across the {scene_count} scenes."
     )
     parts.append("")
     parts.append("Return only the JSON object as defined by your output contract. No prose, no markdown fences.")

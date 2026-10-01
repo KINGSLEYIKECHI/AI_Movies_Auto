@@ -12,12 +12,17 @@ services:
     environment:
       COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
     volumes:
+      - ../Modelfile:/modelfile/Modelfile:ro
       - ./gateway/run_openai_reference_jobs.py:/app/run_openai_reference_jobs.py
       - ./gateway/asset_review.py:/app/asset_review.py
       - ./gateway/run_comfyui_reference_jobs.py:/app/run_comfyui_reference_jobs.py
       - ../comfyworkflow:/app/workflows:ro
       - ./gateway/automation_api.py:/app/automation_api.py:ro
       - ./gateway/review.html:/app/review.html:ro
+      - ./gateway/studio.css:/app/studio.css:ro
+      - ./gateway/studio.js:/app/studio.js:ro
+      - ./gateway/production_control.py:/app/production_control.py:ro
+      - ./gateway/plan_production.py:/app/plan_production.py:ro
       - ./gateway/run_comfyui_video_jobs.py:/app/run_comfyui_video_jobs.py:ro
       - ./gateway/assemble_episode.py:/app/assemble_episode.py:ro
       - ./gateway/advance_pipeline.py:/app/advance_pipeline.py:ro

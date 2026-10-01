@@ -229,7 +229,7 @@ location bible, but only an OUTLINE of every episode, not the shot-by-shot
 content of any of them.
 
 ### scene_plan (array) — used ONLY for stage "SCENE_PLAN"
-Called once per episode, after the series outline exists. Plans EXACTLY 4
+Called once per episode, after the series outline exists. Plans the requested number of
 scene beats covering that episode's full arc — NOT the shots themselves,
 just what happens in each scene, at a paragraph level. Each item:
 {
@@ -240,13 +240,13 @@ just what happens in each scene, at a paragraph level. Each item:
   "location_id": "string, ref to locations.location_id — where this scene takes place",
   "character_ids": ["string, ref to characters.character_id — ONLY characters actually present in THIS scene"]
 }
-The 4 beats together must form one continuous, logically connected episode
+The requested scene beats together must form one continuous, logically connected episode
 — each beat's ending should flow into the next beat's beginning. Do NOT
 generate "shots" in a SCENE_PLAN response.
 
 ### shots (flat array) — used ONLY for stage "SHOT_PLAN"
 Called once per scene (not per episode), after that scene's plan already
-exists. Generates EXACTLY 4 shots for ONE specific scene — the scene_id
+exists. Generates EXACTLY the requested number of shots for ONE specific scene — the scene_id
 will be given to you; do not invent a different one. Each shot uses the
 exact same shape as a shot inside "episodes" (see below), and this stage
 ALSO requires a top-level "scene_ending_state" string (2-3 sentences —
@@ -337,9 +337,11 @@ Return: full "project" bible, full "characters" array (exactly the
 requested count), full "locations" array (exactly the requested count),
 and the full "episode_outline" array covering EVERY episode requested —
 but do NOT generate "episodes" (the detailed scenes/shots) in this call.
-Omit "episodes", "wardrobe", and "props" entirely from a SERIES_OUTLINE
-response; those get created later (wardrobe/props can be introduced
-per-episode as needed, same as any other LONG-FORM SERIES MODE call).
+Omit "episodes" from a SERIES_OUTLINE response. When the production prompt asks
+for canonical wardrobe and props, include complete "wardrobe" and "props" arrays
+in this initial response (empty arrays only when no such assets are needed).
+All default_wardrobe_id, prop_ids, and recurring_props references must identify
+assets established in those arrays; do not defer required visual facts.
 
 When planning character_ids/location_ids per episode_outline entry, use
 real narrative judgment — not every character needs to appear in every
@@ -356,20 +358,20 @@ in it. Reference context will include: the episode's title/summary from
 episode_outline, and only the characters/locations that outline entry
 says belong to this episode.
 
-Return ONLY "scene_plan" (exactly 4 entries) as defined above. Do not
+Return ONLY "scene_plan" (exactly the number of entries requested in the prompt) as defined above. Do not
 generate "episodes", "shots", or any bible content in this response.
 
-Distribute the episode's events across the 4 scenes with real pacing —
+Distribute the episode's events across the requested scenes with real pacing —
 an opening beat, rising development, a turn, a climax, a resolution —
-not 4 interchangeable fragments. Not every scene needs every character
+not interchangeable fragments. Not every scene needs every character
 from the episode; assign character_ids/location_ids per scene based on
 who/where actually matters for that specific beat.
 
 ## SHOT GENERATION MODE (stage "SHOT_PLAN")
 
-Called once per scene (4 times per episode, not once per episode). You
+Called once per scene (as many calls per episode as the requested scene count). You
 will be given:
-- the FULL 4-scene plan for this episode (every beat, as a map of the
+- the FULL scene plan for this episode (every beat, as a map of the
   whole episode) so you always know what comes before and after this
   scene, even though you're only generating THIS scene's shots right now
 - which specific scene_id to generate shots for
@@ -379,11 +381,11 @@ will be given:
   previous episode's ending state)
 - ONLY the characters/locations/props relevant to this one scene
 
-Return ONLY "shots" (exactly 4 items, flat array, using the given
+Return ONLY "shots" (exactly the requested number of items, flat array, using the given
 scene_id on every one) and "scene_ending_state" as defined above.
 
-Every shot's duration_seconds MUST be set to the exact value given in the
-prompt — this is computed by the production pipeline, not your decision;
+Every shot's duration_seconds MUST match its specific budget in the
+prompt; a per-shot duration map overrides a uniform-duration default — this is computed by the production pipeline, not your decision;
 do not deviate from it even slightly.
 
 Dialogue variety is a HARD REQUIREMENT across shots and across scenes.
@@ -414,9 +416,11 @@ For these calls, use stage "EPISODE_FULL" and return ONLY the "episodes" array c
 
 If something changed, include ONLY that specific character/prop/location object (full object, all its fields — not a partial diff), not the entire cast/location list. Everyone and everything unchanged is simply left out of the response.
 
-STRUCTURE IS FIXED, not runtime-driven: every episode has EXACTLY 4 scenes, and every scene has EXACTLY 4 shots (16 shots total per episode) — regardless of episode number, and independent of how many shots any other episode had. This is a hard structural requirement, not a stylistic target. Do not pad with filler shots to reach the count and do not compress the story to fall short of it — pace the actual story content across exactly this many scenes/shots.
-
-You may still set a reasonable duration_seconds per shot for your own internal pacing sense, but the ACTUAL playback duration used downstream is computed and overridden by the production pipeline afterward — do not try to hit any particular total episode runtime through duration_seconds. Your job is content and pacing across the fixed 4x4 structure, not timing.
+Use the scene and shot counts explicitly requested in the production prompt.
+When no counts are supplied, default to four scenes and four shots per scene.
+Never override requested counts with that default. Use the per-shot runtime
+budget supplied by the pipeline; do not invent different shot durations.
+Pace real narrative content across this structure without filler or duplication.
 
 Never contradict the continuity snapshot. If it says a character is injured, holding a specific prop, or in a specific location, that must be respected as the starting state of this episode.
 

@@ -36,10 +36,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "http://gateway:8000/projects/nigerian_mechanic_past_machine/workers/pipeline",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "{\"limit\":1}",
+        "url": "http://gateway:8000/automation/tick",
         "options": {}
       },
       "onError": "continueErrorOutput"

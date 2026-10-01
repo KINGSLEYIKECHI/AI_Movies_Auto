@@ -17,7 +17,7 @@ COPY run_image_jobs.py .
 COPY run_openai_reference_jobs.py .
 COPY asset_review.py .
 COPY automation_api.py run_comfyui_reference_jobs.py run_comfyui_video_jobs.py assemble_episode.py ./
-COPY review.html advance_pipeline.py ./
+COPY review.html studio.css studio.js advance_pipeline.py production_control.py plan_production.py ./
 COPY run_glm_prompt.py .
 COPY run_episode_batch.py .
 COPY GLM_Test_Prompt.txt .

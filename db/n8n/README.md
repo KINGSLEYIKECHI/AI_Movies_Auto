@@ -33,10 +33,8 @@ Invoke-RestMethod "http://localhost:5678/webhook/film/run?run_id=$($run.id)"
 During editor testing, use `/webhook-test/` URLs while the matching webhook is
 listening. No credentials/API keys belong in the workflow JSON. These local
 controls assume one trusted operator; Compose publishes them only on loopback.
-Import `film-automation-schedule.json` for automatic continuation of the existing
-planned story. It submits a one-job pipeline batch every five minutes and stops
-production at approval gates, rejection, or failures. Set its project URL before
-activating for another story. Activating permits paid OpenAI image generation.
-It is inactive by default. Busy-worker responses use the error output; no second
-render starts. Use run logs and gateway status to inspect failures. New-story
-planning remains controlled by the existing Ollama scripts.
+Import `film-automation-schedule.json` only if you need n8n continuation.
+It calls `/automation/tick` every five minutes for productions enabled in the studio
+and respects prompt approval and stage reviews. The gateway already runs its own
+ten-second timer. The workflow is inactive by default; enabled production permits
+paid image generation. New productions are planned in the studio interface.

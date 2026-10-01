@@ -24,18 +24,18 @@ def main():
     if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',value) for value in (project,episode)): raise RuntimeError('Invalid ID')
     conn=mysql.connector.connect(**DB);cur=conn.cursor(dictionary=True)
     try:
-        cur.execute('SELECT s.shot_id FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s AND sp.episode_id=%s ORDER BY sp.scene_number,s.shot_id',(project,episode));shots=cur.fetchall()
+        cur.execute('SELECT s.shot_id,s.duration_seconds FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s AND sp.episode_id=%s ORDER BY sp.scene_number,s.shot_id',(project,episode));shots=cur.fetchall()
         if not shots:raise RuntimeError('No planned shots for episode')
         folder=Path(os.getenv('PROJECTS_BASE_PATH','/ai_movies'))/project/'final'/episode/uuid.uuid4().hex;folder.mkdir(parents=True)
         clips=[];captions=[];offset=0.0
         for shot in shots:
             cur.execute("SELECT output_path FROM asset_records WHERE project_id=%s AND entity_id=%s AND asset_type='shot_video' AND status='approved' ORDER BY reviewed_at DESC,id DESC LIMIT 1",(project,shot['shot_id']));asset=cur.fetchone()
             if not asset:raise RuntimeError(f"Approve video for {shot['shot_id']} before assembly")
-            source=Path(asset['output_path']);info=probe(source);duration=float(info['format']['duration']);target=folder/f'{len(clips):04}.mp4'
+            source=Path(asset['output_path']);info=probe(source);duration=float(shot['duration_seconds'] or info['format']['duration']);target=folder/f'{len(clips):04}.mp4'
             args=['ffmpeg','-y','-i',str(source)]
             has_audio=any(s['codec_type']=='audio' for s in info['streams'])
             if not has_audio:args+=['-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=48000']
-            args+=['-map','0:v:0','-map','0:a:0' if has_audio else '1:a:0','-vf','scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1','-r','24','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-ar','48000','-ac','2','-t',str(duration),str(target)]
+            args+=['-map','0:v:0','-map','0:a:0' if has_audio else '1:a:0','-vf','scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration='+str(duration),'-r','24','-c:v','libx264','-pix_fmt','yuv420p','-af','apad','-c:a','aac','-ar','48000','-ac','2','-t',str(duration),str(target)]
             subprocess.run(args,check=True,stdout=subprocess.DEVNULL);clips.append(target)
             cur.execute('SELECT line FROM shot_dialogue WHERE shot_id=%s ORDER BY line_order,id',(shot['shot_id'],));lines=[r['line'] for r in cur.fetchall() if r['line']]
             for index,line in enumerate(lines):captions.append(f'{len(captions)+1}\n{timestamp(offset+duration*index/len(lines))} --> {timestamp(offset+duration*(index+1)/len(lines))}\n{line}\n')

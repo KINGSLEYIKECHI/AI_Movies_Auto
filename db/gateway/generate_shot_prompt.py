@@ -134,7 +134,7 @@ def fetch_continuity_pointer(cursor, project_id: str, episode_id: str, episode_n
     return "This is the very first scene of the series â€” no prior continuity."
 
 
-def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str:
+def build_prompt(project_id: str, episode_number: int, scene_number: int, shot_count: int = 4, durations: list[int] | None = None) -> str:
 
     conn = mysql.connector.connect(**DB_CONFIG)
     cursor = conn.cursor()
@@ -175,7 +175,7 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str
     parts.append(f"Project: {project_id}, Episode {episode_number}, Scene {scene_number} "
                  f"(scene_id: {this_scene['scene_id']}).")
     parts.append("")
-    parts.append("FULL EPISODE MAP (all 4 scenes, for context â€” you are only generating shots for ONE of these):")
+    parts.append("FULL EPISODE MAP (for context â€” you are only generating shots for ONE of these):")
     parts.append(json.dumps(full_map, ensure_ascii=False))
     parts.append("")
     parts.append(f"THIS SCENE'S BEAT: {this_scene['beat']}")
@@ -192,8 +192,8 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str
     parts.append(json.dumps(bibles["props"], ensure_ascii=False))
     parts.append("")
     parts.append(
-        f"TASK: Generate exactly 4 shots for scene_id \"{this_scene['scene_id']}\" "
-        f"(shot_id format: {this_scene['scene_id']}_SH_01 through {this_scene['scene_id']}_SH_04). "
+        f"TASK: Generate exactly {shot_count} shots for scene_id \"{this_scene['scene_id']}\" "
+        f"(shot_id format: {this_scene['scene_id']}_SH_01 through {this_scene['scene_id']}_SH_{shot_count:02d}). "
         f"Every shot's duration_seconds MUST be exactly {per_shot_seconds} â€” this is fixed by the "
         f"production pipeline, not your decision. Also return scene_ending_state summarizing how "
         f"this scene ends, for the next scene's continuity."
@@ -204,6 +204,9 @@ def build_prompt(project_id: str, episode_number: int, scene_number: int) -> str
         "same or near-identical line across shots or scenes."
     )
     parts.append("")
+    if durations:
+        parts = [part.replace(f"Every shot's duration_seconds MUST be exactly {per_shot_seconds}", "Use the per-shot duration budget below") for part in parts]
+        parts.append("Exact runtime budget, overriding any uniform duration instruction: " + json.dumps({f"{this_scene['scene_id']}_SH_{i+1:02d}": seconds for i, seconds in enumerate(durations)}))
     parts.append("Return only the JSON object as defined by your output contract. No prose, no markdown fences.")
 
     return "\n".join(parts)

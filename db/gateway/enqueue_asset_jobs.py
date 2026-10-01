@@ -22,6 +22,7 @@ from pathlib import Path
 
 import mysql.connector
 from dotenv import load_dotenv
+from production_control import read_settings
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -48,12 +49,15 @@ def enqueue_references(cursor, project_id: str) -> int:
     """One reference-image job per character/location/prop that doesn't
     already have one â€” this is the 'lock the look once' mechanism."""
     count = 0
+    settings = read_settings(project_id)
+    style = (settings or {}).get("spec", {}).get("visual_style", "")
+    style_instruction = f"\nProduction visual style: {style}. Establish a reusable canonical asset with consistent identity and materials." if style else ""
 
     cursor.execute("SELECT character_id, name, appearance FROM characters WHERE project_id = %s", (project_id,))
     for character_id, name, appearance in cursor.fetchall():
         if _job_exists(cursor, project_id, "character_reference", "character_id", character_id):
             continue
-        prompt = f"Reference portrait of {name}. {appearance or ''}"
+        prompt = f"Reference portrait of {name}. {appearance or ''}" + style_instruction
         out_path = str(BASE_PATH / project_id / "assets" / "characters" / f"{character_id.split('__')[-1]}.png")
         cursor.execute(
             "INSERT INTO jobs (project_id, character_id, job_type, prompt, output_path, status) "
@@ -66,7 +70,7 @@ def enqueue_references(cursor, project_id: str) -> int:
     for location_id, name, architecture, atmosphere in cursor.fetchall():
         if _job_exists(cursor, project_id, "location_reference", "location_id", location_id):
             continue
-        prompt = f"Reference establishing shot of {name}. {architecture or ''} {atmosphere or ''}"
+        prompt = f"Reference establishing shot of {name}. {architecture or ''} {atmosphere or ''}" + style_instruction
         out_path = str(BASE_PATH / project_id / "assets" / "locations" / f"{location_id.split('__')[-1]}.png")
         cursor.execute(
             "INSERT INTO jobs (project_id, location_id, job_type, prompt, output_path, status) "
@@ -79,7 +83,7 @@ def enqueue_references(cursor, project_id: str) -> int:
     for prop_id, name, appearance in cursor.fetchall():
         if _job_exists(cursor, project_id, "prop_reference", "prop_id", prop_id):
             continue
-        prompt = f"Reference image of {name}. {appearance or ''}"
+        prompt = f"Reference image of {name}. {appearance or ''}" + style_instruction
         out_path = str(BASE_PATH / project_id / "assets" / "props" / f"{prop_id.split('__')[-1]}.png")
         cursor.execute(
             "INSERT INTO jobs (project_id, prop_id, job_type, prompt, output_path, status) "

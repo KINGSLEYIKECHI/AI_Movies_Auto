@@ -1,9 +1,9 @@
 # Automation rollout
 
-Run these commands from the `db` directory of your production checkout (the
-checkout containing your real `.env` and existing Compose project). Do not
-start a second stack from this worktree: its default volume names differ.
-Copy/merge the updated source into the existing production checkout first.
+Run these commands from the `db` directory of your existing production checkout,
+which contains your real `.env` and Compose volumes. The current changes are in
+the original project folder. See [STUDIO_GUIDE.md](STUDIO_GUIDE.md) for the new
+production interface and a small first test.
 
 ## Back up and migrate the existing story
 
@@ -54,30 +54,19 @@ Never use `docker compose down -v` against your production stack.
 
 ## Produce and review
 
-Select `nigerian_mechanic_past_machine` in the review panel:
+Use **Describe** to enter a concept, episode/scene/shot counts, runtime and models.
+Compute and edit the prompt, then generate the full plan. In **Prompts**, review
+queued image and video prompts before approving and starting automation.
 
-1. Queue references. Generate a small OpenAI batch and inspect its progress.
-2. Approve the character/location/prop candidates. Reject poor results, select
-   rejected assets, and use **Queue new version**, then start the worker again.
-3. Queue shot images and generate with OpenAI. Missing approved references
-   block the image worker. Local canonical generation requires a configured
-   `project_model_fallbacks` entry; it never generates reference-free shot images.
-4. Approve shot frames. All shot frames must be approved before queuing video.
-5. Queue videos and render locally. Your locked project video model must be
-   `ltx-2.5` or `minimax-h3` with its registered supplied workflow path. ComfyUI
-   must already have the workflow's models and custom nodes installed.
-6. Approve video clips. Enter the full project-scoped episode ID (as stored in
-   `scene_plan.episode_id`) and assemble the episode. Assembly uses that episode's
-   approved videos, preserves audio, normalizes clips to 720x1280 at 24 fps, and
-   creates `episode.mp4` and a separate `episode.srt` under the final folder.
-7. Review the final export candidate.
+The gateway checks enabled productions every ten seconds, starts one batch at a
+time and pauses for review at each stage by default. Approve canonical references,
+shot frames, video clips and final exports in **Review**. Use **Exports** for the
+assembled files. Pause automation before editing prompts; the active batch finishes.
+Replacement versions pause automation and require fresh prompt approval.
 
-Default batch size is one to make the first paid render reviewable. Runs return
-an ID immediately; `/runs/{id}` supplies persisted status and recent log output.
-One worker runs at a time in the gateway to avoid overlapping GPU requests.
-Run uvicorn with one process. External CLI workers must not be run concurrently
-with it. Worker submissions are explicit; review approval does not trigger new
-paid generation automatically.
+Runs return an ID immediately; `/runs/{id}` supplies persisted status and log
+output. Use one uvicorn process and avoid concurrent external CLI workers.
+Existing projects without studio settings retain the manual worker controls.
 
 Failures stop OpenAI batches. `POST /projects/{project}/jobs/{job_id}/retry`
 requeues a failed job; start its worker afterwards. For video failures with a
@@ -88,11 +77,10 @@ Do not automatically reset running jobs: they may still be executing externally.
 
 ## Scope and validation
 
-The n8n control workflow is described in `db/n8n/README.md`. The optional n8n schedule advances the existing planned story one batch at a
-time and pauses at candidate reviews, rejected assets, or failed/running jobs.
-Import `film-automation-schedule.json` and activate it only when ready for
-automatic paid OpenAI batches; it checks every five minutes. It remains inactive
-in the source. Separate wardrobe assets, scene-specific prop assignment, previous
+The n8n control workflow is described in `db/n8n/README.md`. The optional schedule
+calls `/automation/tick` every five minutes for enabled, planned productions and
+respects their review gates. The built-in gateway timer already handles this;
+leave the n8n schedule inactive unless needed. Separate wardrobe assets, scene-specific prop assignment, previous
 frame continuity, independent local voice/music generation, and precise subtitle
 alignment are not yet implemented. Current OpenAI shot references select approved
 character identities and locations. LTX/MiniMax workflow-generated audio is retained.
