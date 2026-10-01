@@ -55,3 +55,29 @@ docker compose -f docker-compose.yml -f docker-compose.automation.yml up -d --bu
 ```
 
 Open the Studio at `http://localhost:8000/review` and refresh the browser.
+
+
+### A video finished but production is stuck
+
+Manual batch size applies only to manual generation. Automatic production schedules one job per run and continues until the selected stage review is due.
+
+After updating the gateway, use **Check saved video render** under **Production → Jobs that need attention** for a failed or interrupted video. This checks its saved ComfyUI prompt, downloads the finished clip, creates its review asset and marks the job done without submitting another render. Unknown/missing history remains unresolved rather than triggering duplicate work. A proven ComfyUI error can be retried; its old submission record is archived.
+
+If the gateway itself is still waiting on an old worker, restart only the gateway after checking ComfyUI's queue:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.automation.yml restart gateway
+```
+
+Restarting the gateway interrupts its waiting worker; ComfyUI continues any already submitted render. Then refresh the Studio and check the saved video. Do not delete the submission sidecar or reset the database job manually.
+
+The video worker requests ComfyUI model unloading after each saved clip when its queue is empty. Failures to unload are logged as warnings and do not undo a finished video or stop the batch. Set `RELEASE_VIDEO_MEMORY=0` in the gateway environment if you later prefer faster sequential renders with models kept loaded. The manual **Release idle model memory** button also requests Ollama unloading. Task Manager can still show GPU memory held by other applications; an unload request is not a guarantee that all GPU memory becomes empty.
+
+
+For the full worker log, expand **Current run → Generation log** and download the full latest run log. On the build machine it is also saved under `db/gateway/outputs/runs/*.log`. From the `db` folder, read the newest worker log with:
+
+```powershell
+Get-ChildItem .\gateway\outputs\runs\*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Get-Content -Tail 150
+```
+
+Gateway container logs mainly show API/server activity; video generation errors also appear in the worker log and the ComfyUI console.

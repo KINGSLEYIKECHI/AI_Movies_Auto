@@ -23,7 +23,11 @@ Image.new('RGB',(512,768),'#75907b').save(image_path)
 assets=[{'id':5,'project_id':'preview_workshop','job_id':None,'status':'rejected','asset_type':'character_reference','entity_id':'CHAR_001','output_path':str(image_path),'generation_model':'Fixture model','original_prompt':'A cinematic character portrait. Change the jacket to blue while preserving the face.'}]
 def jobs(project):return [{'id':1,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'done','prompt':'Canonical reference portrait of a Nigerian mechanic. Preserve natural facial detail, workshop clothing and warm cinematic lighting.'},{'id':3,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'queued','prompt':'Canonical portrait of the next character.'},{'id':2,'job_type':'shot_image','scene_id':project+'__EP_001_SC_01','shot_id':project+'__EP_001_SC_01_SH_01','status':'queued','prompt':'Wide establishing frame inside the workshop. The mechanic stands beside the machine. Warm late-afternoon light; grounded cinematic realism.'}]
 
+video_fixture=os.getenv('STUDIO_FIXTURE_VIDEO')=='1'
+fixture_refreshes=0
+if video_fixture:api.active=True
 def query(sql,params=()):
+ global fixture_refreshes
  p=params[0] if params else 'preview_workshop'
  if sql.startswith('SELECT s.shot_id,s.scene_id,s.character_ids'):
   return [dict(shot_id=params[1],scene_id=p+'__EP_001_SC_01',character_ids='["CHAR_001","CHAR_002"]',location_id='LOC_001')],1
@@ -32,7 +36,7 @@ def query(sql,params=()):
 
  if sql.startswith('SELECT project_id FROM projects WHERE'):return ([projects[p]] if p in projects else [],1)
  if sql.startswith('SELECT project_id FROM projects ORDER'):return (list(projects.values()),len(projects))
- if sql.startswith('SELECT status,prompt FROM jobs'):
+ if sql.startswith('SELECT status,prompt'):
   row=next(row for row in jobs(p) if row['id']==params[1]);return [row],1
  if sql.startswith('SELECT job_id,id AS asset_id'):return [{'job_id':1,'asset_id':5}],1
  if sql.startswith('SELECT COUNT(*) AS count FROM shots'):return [{'count':30}],1
@@ -47,6 +51,10 @@ def query(sql,params=()):
  if sql.startswith('INSERT INTO projects'):
   projects[params[0]]={'project_id':params[0],'title':params[1]};return [],1
  if 'FROM model_registry' in sql:return models,3
+ if video_fixture and sql.startswith("SELECT id,job_type,status,error"):return [{'id':11,'job_type':'shot_video','status':'failed','error':'Saved ComfyUI submission needs recovery. Check the finished clip before retrying.'}],1
+ if video_fixture and sql.startswith('SELECT job_type,status'):
+  fixture_refreshes+=1
+  if fixture_refreshes>=2:api.active=False
  if sql.startswith('SELECT job_type,status'):return ([{'job_type':'character_reference','status':'done','count':1},{'job_type':'character_reference','status':'queued','count':1},{'job_type':'shot_image','status':'queued','count':1}],3)
  if sql.startswith('SELECT DISTINCT episode_id'):return ([{'episode_id':p+'__EP_001'}],1)
  if sql.startswith('SELECT id,job_type,scene_id'):return jobs(p),2

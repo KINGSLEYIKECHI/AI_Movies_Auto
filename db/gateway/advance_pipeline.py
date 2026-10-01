@@ -10,6 +10,7 @@ from asset_control import UNRESOLVED_REJECTIONS
 HERE=Path(__file__).parent
 
 def execute(script,*arguments):
+    print(f'STARTING {script}: ' + ' '.join(arguments),flush=True)
     subprocess.run([sys.executable,'-u',str(HERE/script),*arguments],check=True)
 
 def main():

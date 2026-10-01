@@ -14,6 +14,7 @@ import time
 import requests
 from production_control import ProductionSpec, preview, read_settings, write_settings, root, can_finish_stage_before_review
 from run_comfyui_reference_jobs import COMFYUI_URL
+from run_comfyui_video_jobs import saved_video, completed_video, record_video
 from pydantic import BaseModel, Field
 import mysql.connector
 from asset_control import IMAGE_TYPES, MAX_UPLOAD_BYTES, UNRESOLVED_REJECTIONS, project_folder, scoped_file, save_upload, upload_reference, write_options, read_options
@@ -227,9 +228,50 @@ def review_asset(project_id: str, asset_id: int, body: Review):
 
 @app.post("/projects/{project_id}/jobs/{job_id}/retry")
 def retry(project_id: str, job_id: int):
-    _, changed = query("UPDATE jobs SET status='queued',error=NULL WHERE id=%s AND project_id=%s AND status='failed'", (job_id, project_id))
-    if changed != 1: raise HTTPException(409, "Only failed jobs can be retried")
-    return {"id": job_id, "status": "queued"}
+    with lock:
+        project(project_id)
+        require_idle(project_id)
+        rows,_=query("SELECT job_type,output_path FROM jobs WHERE id=%s AND project_id=%s AND status='failed'",(job_id,project_id))
+        if not rows:raise HTTPException(409,'Only failed jobs can be retried')
+        if rows[0]['job_type']=='shot_video':
+            output=scoped_file(project_id,rows[0]['output_path'],ROOT)
+            sidecar=Path(str(output)+'.comfy.json')
+            if sidecar.is_file():
+                try: _,record=saved_video(output)
+                except (ValueError,KeyError,OSError,requests.RequestException) as exc:raise HTTPException(409,str(exc))
+                if not record or record.get('status',{}).get('status_str')!='error':
+                    raise HTTPException(409,'Check saved video render first. Existing ComfyUI work is unresolved or already complete; it will not be resubmitted.')
+                sidecar.rename(sidecar.with_name(sidecar.name+'.failed-'+uuid.uuid4().hex))
+        _,changed=query("UPDATE jobs SET status='queued',error=NULL WHERE id=%s AND project_id=%s AND status='failed'",(job_id,project_id))
+        if changed!=1:raise HTTPException(409,'Job status changed; refresh before retrying')
+        return {'id':job_id,'status':'queued'}
+
+@app.post('/projects/{project_id}/jobs/{job_id}/recover-video')
+def recover_video(project_id:str,job_id:int):
+    with lock:
+        project(project_id)
+        if active:raise HTTPException(409,'The worker is still waiting. Check its log; restart only the gateway to interrupt its wait, then check this saved video again. ComfyUI will keep its submitted render.')
+        jobs,_=query("SELECT id,shot_id,output_path,model_used FROM jobs WHERE project_id=%s AND id=%s AND job_type='shot_video' AND status IN ('running','failed')",(project_id,job_id))
+        if not jobs:raise HTTPException(409,'Only unresolved video jobs can be recovered')
+        job=jobs[0]
+        try:
+            output=scoped_file(project_id,job['output_path'],ROOT)
+            prompt_id,record=saved_video(output)
+            if not record:return {'status':'waiting','message':f'No terminal history for ComfyUI prompt {prompt_id}. No job was reset or resubmitted.'}
+            if not completed_video(record,output):return {'status':'waiting','message':'ComfyUI has not completed this video. No job was reset.'}
+        except (ValueError,KeyError,OSError,requests.RequestException) as exc:raise HTTPException(409,str(exc))
+        except RuntimeError as exc:
+            query("UPDATE jobs SET status='failed',error=%s WHERE project_id=%s AND id=%s",(str(exc),project_id,job_id))
+            return {'status':'failed','message':str(exc)}
+        conn=mysql.connector.connect(**DB);cur=conn.cursor(dictionary=True,buffered=True)
+        try:
+            cur.execute("SELECT id AS asset_id FROM asset_records WHERE project_id=%s AND entity_id=%s AND asset_type='shot_image' AND status='approved' ORDER BY id DESC LIMIT 1",(project_id,job['shot_id']))
+            frame=cur.fetchone();job['asset_id']=frame['asset_id'] if frame else None
+            record_video(cur,project_id,job,job.get('model_used'),bool(read_options(project_id,str(output),ROOT).get('reference_upload_ids')))
+            conn.commit()
+        except Exception:conn.rollback();raise
+        finally:cur.close();conn.close()
+        return {'status':'done','message':'Saved video recovered for Review. No new render was submitted; automatic production can continue.'}
 
 @app.get('/projects/{project_id}/assets/{asset_id}/edit')
 def asset_edit_details(project_id: str, asset_id: int):
@@ -374,6 +416,13 @@ def run_status(run_id: str):
     record["output"] = log.read_text(encoding="utf-8", errors="replace")[-8000:] if log.exists() else ""
     return record
 
+@app.get('/runs/{run_id}/log')
+def full_run_log(run_id:str):
+    run_status(run_id)  # Validate the ID and require the associated saved run.
+    path=RUNS/(run_id+'.log')
+    if not path.is_file():raise HTTPException(404,'This run has no log yet')
+    return FileResponse(path,media_type='text/plain',filename=run_id+'.log',headers={'Cache-Control':'no-store'})
+
 @app.on_event("startup")
 def recover_runs():
     # A process restart interrupts its workers; never silently retry paid work.
@@ -506,6 +555,7 @@ def edit_job_options(project_id: str, job_id: int, body: AssetRevision):
         rows, _ = query("SELECT output_path,job_type FROM jobs WHERE id=%s AND project_id=%s AND status IN ('queued','failed')", (job_id, project_id))
         if not rows: raise HTTPException(409, 'Only queued or failed render inputs can be edited')
         job = rows[0]
+        if job['job_type']=='shot_video' and Path(str(scoped_file(project_id,job['output_path'],ROOT))+'.comfy.json').exists():raise HTTPException(409,'Check saved video render before changing inputs. A submitted video must be recovered or safely retried first.')
         if job['job_type'] not in IMAGE_TYPES | {'shot_video'}: raise HTTPException(400, 'Unsupported render type')
         options = read_options(project_id, job['output_path'], ROOT)
         if body.use_source_image and not options.get('source_asset_id'): raise HTTPException(400, 'This job has no original image to edit')
@@ -529,8 +579,9 @@ def edit_job_prompt(project_id: str,job_id: int,body: PromptEdit):
     project(project_id)
     with lock:
         if active or (read_settings(project_id) or {}).get('automation_enabled'):raise HTTPException(409,'Pause production and wait for the current worker before editing prompts')
-        rows,_=query('SELECT status,prompt FROM jobs WHERE project_id=%s AND id=%s',(project_id,job_id))
+        rows,_=query('SELECT status,prompt,job_type,output_path FROM jobs WHERE project_id=%s AND id=%s',(project_id,job_id))
         if not rows or rows[0]['status'] not in {'queued','failed'}:raise HTTPException(409,'This job is already running or completed. Create an edited version from its asset; acceptance does not lock editing.')
+        if rows[0].get('job_type')=='shot_video' and Path(str(scoped_file(project_id,rows[0]['output_path'],ROOT))+'.comfy.json').exists():raise HTTPException(409,'Check saved video render before editing this submitted prompt')
         if rows[0]['prompt']==body.prompt:return {'saved':True,'unchanged':True}
         _,changed=query("UPDATE jobs SET prompt=%s WHERE project_id=%s AND id=%s AND status IN ('queued','failed')",(body.prompt,project_id,job_id))
         if changed!=1:raise HTTPException(409,'Job status changed. Refresh its status before editing')
