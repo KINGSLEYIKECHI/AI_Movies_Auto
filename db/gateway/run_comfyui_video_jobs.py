@@ -75,7 +75,7 @@ def main():
         cur.execute("SELECT mr.model_key,mr.workflow_template_path,pm.locked_duration_seconds FROM project_model_config pm JOIN model_registry mr ON mr.model_key=pm.video_model_key WHERE pm.project_id=%s AND mr.backend='comfyui'",(project,));model=cur.fetchone()
         if not model: raise RuntimeError('Lock a local ComfyUI video model for this project first')
         settings=read_settings(project)
-        spec=ProductionSpec(**settings['spec']) if settings else None
+        spec=ProductionSpec(**settings['spec']) if settings and not settings.get('legacy') else None
         template=Path(model['workflow_template_path'] or '')
         if not template.is_file(): raise RuntimeError('Video workflow path is missing; apply migration 13')
         cur.execute("SELECT j.*,s.duration_seconds,s.video_prompt,a.id AS asset_id,a.output_path AS frame FROM jobs j JOIN shots s ON s.shot_id=j.shot_id JOIN asset_records a ON a.project_id=j.project_id AND a.entity_id=j.shot_id AND a.asset_type='shot_image' AND a.status='approved' WHERE j.project_id=%s AND j.job_type='shot_video' AND j.status='queued' AND (%s IS NULL OR j.id=%s) AND a.id=(SELECT MAX(a2.id) FROM asset_records a2 WHERE a2.project_id=j.project_id AND a2.entity_id=j.shot_id AND a2.asset_type='shot_image' AND a2.status='approved') ORDER BY j.id LIMIT %s",(project,selected_job,selected_job,limit));jobs=cur.fetchall()

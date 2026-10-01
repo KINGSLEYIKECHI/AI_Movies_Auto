@@ -39,7 +39,7 @@ BASE_PATH = Path(os.getenv("PROJECTS_BASE_PATH", "/ai_movies"))
 
 def _job_exists(cursor, project_id, job_type, entity_col, entity_id):
     cursor.execute(
-        f"SELECT id FROM jobs WHERE project_id = %s AND job_type = %s AND {entity_col} = %s",
+        f"SELECT id FROM jobs WHERE project_id = %s AND job_type = %s AND {entity_col} = %s LIMIT 1",
         (project_id, job_type, entity_id),
     )
     return cursor.fetchone() is not None
@@ -217,7 +217,7 @@ def main():
     project_id, action = sys.argv[1], sys.argv[2]
 
     conn = mysql.connector.connect(**DB_CONFIG)
-    cursor = conn.cursor()
+    cursor = conn.cursor(buffered=True)
     try:
         if action == "references":
             n = enqueue_references(cursor, project_id)

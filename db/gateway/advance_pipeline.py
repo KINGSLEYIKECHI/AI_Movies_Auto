@@ -15,7 +15,7 @@ def execute(script,*arguments):
 def main():
     project=sys.argv[1]
     limit=sys.argv[sys.argv.index('--limit')+1] if '--limit' in sys.argv else '1'
-    conn=mysql.connector.connect(**DB);cur=conn.cursor()
+    conn=mysql.connector.connect(**DB);cur=conn.cursor(buffered=True)
     try:
         settings=read_settings(project)
         if settings and (settings.get('planning_status')!='ready' or not settings.get('prompts_approved')):

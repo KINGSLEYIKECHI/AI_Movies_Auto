@@ -14,18 +14,23 @@ api.RUNS=Path(workspace.name)/'runs'
 projects={'preview_workshop':{'project_id':'preview_workshop','title':'The Echo Workshop'}}
 spec=ProductionSpec(project_id='preview_workshop',title='The Echo Workshop',concept='A young mechanic discovers a machine that can replay fragments of the past.',image_model_key='test-image',episodes=2,scenes_per_episode=3,shots_per_scene=5,episode_seconds=100)
 write_settings('preview_workshop',{'spec':spec.model_dump(),'planning_status':'ready','completed':['outline'],'automation_enabled':False,'prompts_approved':False})
+if os.getenv('STUDIO_FIXTURE_LEGACY')=='1':(Path(workspace.name)/'preview_workshop'/'production.json').unlink()
 models=[{'model_key':'test-image','model_type':'image','backend':'openai_api','display_name':'Configured image model (preview)','available':True},{'model_key':'ltx-2.5','model_type':'video','backend':'comfyui','display_name':'LTX 2.5','available':True},{'model_key':'minimax-h3','model_type':'video','backend':'comfyui','display_name':'MiniMax H3','available':True}]
 from PIL import Image
 image_path=Path(workspace.name)/'preview_workshop'/'assets'/'character.png'
 image_path.parent.mkdir(parents=True,exist_ok=True)
 Image.new('RGB',(512,768),'#75907b').save(image_path)
 assets=[{'id':5,'project_id':'preview_workshop','job_id':None,'status':'rejected','asset_type':'character_reference','entity_id':'CHAR_001','output_path':str(image_path),'generation_model':'Fixture model','original_prompt':'A cinematic character portrait. Change the jacket to blue while preserving the face.'}]
-def jobs(project):return [{'id':1,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'queued','prompt':'Canonical reference portrait of a Nigerian mechanic. Preserve natural facial detail, workshop clothing and warm cinematic lighting.'},{'id':2,'job_type':'shot_image','scene_id':project+'__EP_001_SC_01','shot_id':project+'__EP_001_SC_01_SH_01','status':'queued','prompt':'Wide establishing frame inside the workshop. The mechanic stands beside the machine. Warm late-afternoon light; grounded cinematic realism.'}]
+def jobs(project):return [{'id':1,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'done','prompt':'Canonical reference portrait of a Nigerian mechanic. Preserve natural facial detail, workshop clothing and warm cinematic lighting.'},{'id':3,'job_type':'character_reference','scene_id':None,'shot_id':None,'status':'queued','prompt':'Canonical portrait of the next character.'},{'id':2,'job_type':'shot_image','scene_id':project+'__EP_001_SC_01','shot_id':project+'__EP_001_SC_01_SH_01','status':'queued','prompt':'Wide establishing frame inside the workshop. The mechanic stands beside the machine. Warm late-afternoon light; grounded cinematic realism.'}]
 
 def query(sql,params=()):
  p=params[0] if params else 'preview_workshop'
  if sql.startswith('SELECT project_id FROM projects WHERE'):return ([projects[p]] if p in projects else [],1)
  if sql.startswith('SELECT project_id FROM projects ORDER'):return (list(projects.values()),len(projects))
+ if sql.startswith('SELECT status,prompt FROM jobs'):
+  row=next(row for row in jobs(p) if row['id']==params[1]);return [row],1
+ if sql.startswith('SELECT job_id,id AS asset_id'):return [{'job_id':1,'asset_id':5}],1
+ if sql.startswith('SELECT COUNT(*) AS count FROM shots'):return [{'count':30}],1
  if sql.startswith('SELECT (SELECT COUNT(*) FROM jobs'):return [{'jobs':2,'assets':len(assets)}],1
  if sql.startswith('SELECT a.*,j.prompt'):return [assets[0]],1
  if "asset_type='final_render'" in sql:return [],0
@@ -37,7 +42,7 @@ def query(sql,params=()):
  if sql.startswith('INSERT INTO projects'):
   projects[params[0]]={'project_id':params[0],'title':params[1]};return [],1
  if 'FROM model_registry' in sql:return models,3
- if sql.startswith('SELECT job_type,status'):return ([{'job_type':'character_reference','status':'queued','count':1},{'job_type':'shot_image','status':'queued','count':1}],2)
+ if sql.startswith('SELECT job_type,status'):return ([{'job_type':'character_reference','status':'done','count':1},{'job_type':'character_reference','status':'queued','count':1},{'job_type':'shot_image','status':'queued','count':1}],3)
  if sql.startswith('SELECT DISTINCT episode_id'):return ([{'episode_id':p+'__EP_001'}],1)
  if sql.startswith('SELECT id,job_type,scene_id'):return jobs(p),2
  if sql.startswith('SELECT s.shot_id,s.scene_id,s.video_prompt'):return ([{'shot_id':p+'__EP_001_SC_01_SH_01','scene_id':p+'__EP_001_SC_01','prompt':'Slow push-in as the mechanic touches the machine. Subtle hand motion; workshop room tone.','duration_seconds':7}],1)
@@ -65,7 +70,10 @@ def stub_run(command,**kwargs):
  if kwargs.get('stdout'):kwargs['stdout'].write('Fixture planning completed. No providers called.\n')
  return SimpleNamespace(returncode=0)
 api.subprocess.run=stub_run
-api.requests.get=lambda *args,**kwargs:SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'LoraLoaderModelOnly':{'input':{'required':{'lora_name':[['ltx_compatible_preview.safetensors','minimax_compatible_preview.safetensors']]}}}})
+def provider_get(url,**kwargs):
+ data={'models':[{'name':'glm-film-director','size_vram':8*1024**3}]} if url.endswith('/api/ps') else {'queue_running':[],'queue_pending':[]} if url.endswith('/queue') else {'LoraLoaderModelOnly':{'input':{'required':{'lora_name':[['ltx_compatible_preview.safetensors','minimax_compatible_preview.safetensors']]}}}}
+ return SimpleNamespace(raise_for_status=lambda:None,json=lambda:data)
+api.requests.get=provider_get
 api.requests.post=lambda *args,**kwargs:SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'response':json.dumps({'prompt':kwargs['json']['prompt'].split('Original prompt:\n')[-1]+'\nUse precise camera language and grounded cinematic action.'})})
 if __name__=='__main__':
  import uvicorn

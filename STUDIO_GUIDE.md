@@ -75,6 +75,16 @@ enabled state and review gates. Keep it inactive unless you need that integratio
 
 ## Edit accepted or rejected assets
 
+Existing projects can now use **Approve prompts & start production** without a
+new studio-created story plan. The gateway saves review/automation controls while
+retaining their original shot durations, model locks and story data. Review each
+stage remains the default.
+
+Queued/failed prompts save normally, including when the text is unchanged.
+Selecting a completed prompt enables editing with **Queue edited version** rather
+than overwriting the prompt that produced its original media. Use **Edit image /
+video version** to add image references or modify the original image.
+
 Open **Review**, select the asset's status, and choose **Edit / new version**.
 Acceptance chooses a version for use; it does not lock editing. You can also accept
 a previously rejected version or restore a previous approved version. Accepting a
@@ -131,3 +141,53 @@ Cleanup covers the pipeline's managed database, output folder and gateway logs.
 Separate backups, manually copied files and ComfyUI's own server-side history/cache
 are outside this deletion boundary. No new SQL migration is needed for these
 controls; rebuild the gateway to install the upload-validation dependency.
+
+## Resume after the unread-result queue error
+
+The queue existence check now selects at most one matching job, and queue/pipeline
+cursors are buffered. Multiple asset versions no longer leave unread result rows.
+No project reset or database migration is required for this fix.
+
+Transfer the updated source to the build machine, then run from `db` while no
+worker is active:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.automation.yml up -d --build --force-recreate gateway
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Reload http://localhost:8000/review with Ctrl+Shift+R and select the existing project.
+In **Prompts**, save edits or queue replacement versions as needed. Choose **Approve
+prompts & start production** to let automation finish the remaining reference
+renders, then pause for review before producing shot images and videos.
+
+For manual work, pause automatic production and use **Generate the remaining
+assets** in **Production**:
+
+1. Set the jobs per batch and choose **Generate reference batch**. Repeat as
+   needed, then accept the references in **Review**.
+2. Choose **Generate shot image batch**. Required character/location references
+   must already be accepted. Repeat and review the frames.
+3. Choose **Queue missing videos**, then **Generate video batch** after all shot
+   images are accepted. Review clips, then assemble from **Exports**.
+
+**Queue missing** only adds missing jobs; **Generate** renders queued jobs. Completed
+assets are revised through **Edit / new version**, not through the queue buttons.
+If a render job itself is failed, use its retry control after inspecting its log.
+The unread-result exception occurs during queuing and does not require deleting
+completed assets or resetting all jobs.
+
+## GPU memory without a visible run
+
+**Local engines and GPU memory** shows gateway activity, the configured ComfyUI
+queue, and models currently loaded in the configured Ollama server. A loaded
+model can retain VRAM while GPU utilisation is zero. It does not prove a render
+is active. Other applications or a separate native Ollama instance are not tracked
+by this panel.
+
+Use **Release idle model memory** to request Ollama model unloading and ComfyUI
+cache/model release. It refuses while a gateway worker, running job record or
+ComfyUI queue is active, and refuses if the ComfyUI queue cannot be checked.
+ComfyUI releases asynchronously; refresh the activity view after a moment.
+These operations do not cancel renders or clear their queues. Models reload for
+the next local task.

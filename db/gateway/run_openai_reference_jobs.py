@@ -23,10 +23,12 @@ DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_POR
 REFERENCE_TYPES = ("character_reference", "location_reference", "prop_reference")
 
 
-def next_job(cur, project_id, job_id=None):
+def next_job(cur, project_id, job_id=None, stage=None):
     cur.execute("SELECT id,job_type,prompt,output_path,shot_id FROM jobs WHERE project_id=%s "
                 "AND job_type IN ('character_reference','location_reference','prop_reference','shot_image') "
-                "AND status='queued' AND (%s IS NULL OR id=%s) ORDER BY FIELD(job_type,'character_reference','location_reference','prop_reference','shot_image'),id LIMIT 1", (project_id, job_id, job_id))
+                "AND status='queued' AND (%s IS NULL OR id=%s) "
+                "AND (%s IS NULL OR (%s='references' AND job_type<>'shot_image') OR (%s='shot-images' AND job_type='shot_image')) "
+                "ORDER BY FIELD(job_type,'character_reference','location_reference','prop_reference','shot_image'),id LIMIT 1", (project_id, job_id, job_id, stage, stage, stage))
     row = cur.fetchone()
     return dict(zip(("id", "job_type", "prompt", "output_path", "shot_id"), row)) if row else None
 
@@ -102,6 +104,8 @@ def main():
     project_id = sys.argv[1]
     limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else None
     job_id = int(sys.argv[sys.argv.index('--job-id') + 1]) if '--job-id' in sys.argv else None
+    stage = sys.argv[sys.argv.index('--stage') + 1] if '--stage' in sys.argv else None
+    if stage not in {None,'references','shot-images'}:raise SystemExit('Unknown image stage')
     if not os.getenv("OPENAI_API_KEY"): raise SystemExit("OPENAI_API_KEY is required.")
     conn = mysql.connector.connect(**DB); cur = conn.cursor()
     try:
@@ -110,7 +114,7 @@ def main():
         if not row: raise SystemExit("Lock an OpenAI image model for this project first.")
         model = row[0]; client = OpenAI(); processed = 0; failed = False
         while limit is None or processed < limit:
-            job = next_job(cur, project_id, job_id)
+            job = next_job(cur, project_id, job_id, stage)
             if not job: break
             references, blocker = references_for_shot(cur, project_id, job["shot_id"]) if job["job_type"] == "shot_image" else ([], None)
             if blocker:

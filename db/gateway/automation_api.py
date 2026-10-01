@@ -114,6 +114,7 @@ class RunOptions(BaseModel):
     limit: int = Field(default=1, ge=1, le=100)
     episode_id: str | None = None
     job_id: int | None = Field(default=None, ge=1)
+    stage: str | None = None
 
 def query(sql, params=()):
     conn = mysql.connector.connect(**DB)
@@ -148,7 +149,7 @@ def health():
 
 @app.get("/review")
 def review_page():
-    return FileResponse(Path(__file__).parent / "review.html")
+    return FileResponse(Path(__file__).parent / "review.html",headers={'Cache-Control':'no-store'})
 
 @app.get("/projects")
 def projects():
@@ -286,11 +287,13 @@ def regenerate(project_id: str, asset_id: int, body: AssetRevision = AssetRevisi
 
 @app.post("/projects/{project_id}/queue/{stage}")
 def queue(project_id: str, stage: str):
-    project(project_id)
-    if stage not in {"references", "shot-images", "shot-videos"}: raise HTTPException(400, "Unknown stage")
-    result = subprocess.run([sys.executable, str(Path(__file__).parent / "enqueue_asset_jobs.py"), project_id, stage], capture_output=True, text=True, timeout=60)
-    if result.returncode: raise HTTPException(500, "Queue failed; check gateway logs and schema migration")
-    return {"output": result.stdout}
+    with lock:
+        project(project_id)
+        if active or (read_settings(project_id) or {}).get('automation_enabled'):raise HTTPException(409,'Pause automatic production and wait for the active worker before queuing manual jobs')
+        if stage not in {"references", "shot-images", "shot-videos"}: raise HTTPException(400, "Unknown stage")
+        result = subprocess.run([sys.executable, str(Path(__file__).parent / "enqueue_asset_jobs.py"), project_id, stage], capture_output=True, text=True, timeout=60)
+        if result.returncode: raise HTTPException(500, "Queue failed; check gateway logs and schema migration")
+        return {"output": result.stdout}
 
 @app.post("/projects/{project_id}/workers/{worker}", status_code=202)
 def run_worker(project_id: str, worker: str, body: RunOptions = RunOptions()):
@@ -308,6 +311,9 @@ def run_worker(project_id: str, worker: str, body: RunOptions = RunOptions()):
             raise HTTPException(400, "Assembly requires episode_id")
         command.append(body.episode_id)
     elif worker != "planning": command += ["--limit", str(body.limit)]
+    if body.stage:
+        if worker!='openai-references' or body.stage not in {'references','shot-images'}:raise HTTPException(400,'Select references or shot-images for the OpenAI image worker')
+        command += ['--stage',body.stage]
     if body.job_id:
         if worker not in {'openai-references', 'comfy-videos'}: raise HTTPException(400, 'Individual rendering is supported for OpenAI images and ComfyUI video')
         rows, _ = query("SELECT job_type FROM jobs WHERE id=%s AND project_id=%s AND status='queued'", (body.job_id, project_id))
@@ -379,7 +385,7 @@ def home():
 @app.get('/interface/{filename}')
 def interface_file(filename: str):
     if filename not in {'studio.js','studio.css'}:raise HTTPException(404,'Not found')
-    return FileResponse(Path(__file__).parent/filename)
+    return FileResponse(Path(__file__).parent/filename,headers={'Cache-Control':'no-store'})
 
 @app.get('/projects/{project_id}/exports')
 def production_exports(project_id: str):
@@ -463,6 +469,9 @@ def production_dashboard(project_id: str):
 def production_prompts(project_id: str):
     project(project_id)
     rows,_=query("SELECT id,job_type,scene_id,shot_id,prompt,status FROM jobs WHERE project_id=%s AND job_type IN ('character_reference','location_reference','prop_reference','shot_image','shot_video') ORDER BY id",(project_id,))
+    assets,_=query('SELECT job_id,id AS asset_id FROM asset_records WHERE project_id=%s AND job_id IS NOT NULL ORDER BY id',(project_id,))
+    linked={row['job_id']:row['asset_id'] for row in assets}
+    for row in rows:row['asset_id']=linked.get(row['id'])
     planned,_=query("SELECT s.shot_id,s.scene_id,s.video_prompt AS prompt,s.duration_seconds FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s ORDER BY sp.scene_number,s.shot_id",(project_id,))
     return {'prompts':rows,'video_prompts':planned}
 
@@ -502,8 +511,12 @@ def edit_job_prompt(project_id: str,job_id: int,body: PromptEdit):
     project(project_id)
     with lock:
         if active or (read_settings(project_id) or {}).get('automation_enabled'):raise HTTPException(409,'Pause production and wait for the current worker before editing prompts')
+        rows,_=query('SELECT status,prompt FROM jobs WHERE project_id=%s AND id=%s',(project_id,job_id))
+        if not rows or rows[0]['status'] not in {'queued','failed'}:raise HTTPException(409,'This job is already running or completed. Create an edited version from its asset; acceptance does not lock editing.')
+        if rows[0]['prompt']==body.prompt:return {'saved':True,'unchanged':True}
         _,changed=query("UPDATE jobs SET prompt=%s WHERE project_id=%s AND id=%s AND status IN ('queued','failed')",(body.prompt,project_id,job_id))
-        if changed!=1:raise HTTPException(409,'Only queued or failed prompts can be edited. Reject a completed asset and create a replacement to revise it.')
+        if changed!=1:raise HTTPException(409,'Job status changed. Refresh its status before editing')
+        pause_for_change(project_id)
     return {'saved':True}
 
 @app.put('/projects/{project_id}/shots/{shot_id}/video-prompt')
@@ -513,9 +526,11 @@ def edit_video_prompt(project_id: str,shot_id: str,body: PromptEdit):
         if active or (read_settings(project_id) or {}).get('automation_enabled'):raise HTTPException(409,'Pause production and wait for the current worker before editing prompts')
         running,_=query("SELECT id FROM jobs WHERE project_id=%s AND shot_id=%s AND job_type='shot_video' AND status IN ('running','done')",(project_id,shot_id))
         if running:raise HTTPException(409,'Video already generated. Reject it and edit the replacement job prompt.')
-        _,changed=query('UPDATE shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id SET s.video_prompt=%s WHERE sp.project_id=%s AND s.shot_id=%s',(body.prompt,project_id,shot_id))
-        if changed!=1:raise HTTPException(404,'Shot missing or prompt unchanged')
+        rows,_=query('SELECT s.video_prompt FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s AND s.shot_id=%s',(project_id,shot_id))
+        if not rows:raise HTTPException(404,'Shot missing')
+        query('UPDATE shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id SET s.video_prompt=%s WHERE sp.project_id=%s AND s.shot_id=%s',(body.prompt,project_id,shot_id))
         query("UPDATE jobs SET prompt=%s WHERE project_id=%s AND shot_id=%s AND job_type='shot_video' AND status IN ('queued','failed')",(body.prompt,project_id,shot_id))
+        pause_for_change(project_id)
     return {'saved':True}
 
 @app.post('/prompts/improve')
@@ -536,7 +551,13 @@ def set_automation(project_id: str,body: AutomationOptions):
     project(project_id)
     with lock:
         settings=read_settings(project_id)
-        if not settings:raise HTTPException(400,'Existing projects can use Continue next stage; automatic mode requires saved production settings')
+        if not settings:
+            if not body.enabled:return {'enabled':False,'message':'Production is paused.'}
+            plan,_=query('SELECT COUNT(*) AS count FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s',(project_id,))
+            if not plan or not plan[0]['count']:raise HTTPException(409,'This existing project has no shot plan to produce')
+            if not body.approve_prompts:raise HTTPException(409,'Review and approve the existing prompts first')
+            episodes,_=query('SELECT DISTINCT episode_id FROM scene_plan WHERE project_id=%s',(project_id,))
+            settings={'legacy':True,'planning_status':'ready','completed':[],'prompts_approved':False,'spec':{'review_mode':'every_stage','episodes':len(episodes),'scenes_per_episode':0}}
         if body.enabled and settings.get('planning_status')!='ready':raise HTTPException(409,'Finish planning first')
         if body.enabled and not (body.approve_prompts or settings.get('prompts_approved')):raise HTTPException(409,'Review and approve the prompts before starting production')
         settings['automation_enabled']=body.enabled
@@ -582,3 +603,42 @@ def production_story(project_id: str):
     cast,_=query('SELECT character_id,name,role,appearance FROM characters WHERE project_id=%s ORDER BY character_id',(project_id,))
     outline,_=query('SELECT episode_number,title,summary FROM episode_outline WHERE project_id=%s ORDER BY episode_number',(project_id,))
     return {'bible':bible[0] if bible else {},'cast':cast,'outline':outline}
+
+def ollama_url():
+    host=os.getenv('OLLAMA_HOST','ollama:11434').rstrip('/')
+    return host if host.startswith(('http://','https://')) else 'http://'+host
+
+@app.get('/runtime')
+def runtime_status():
+    result={'worker_busy':active,'ollama':{'connected':False},'comfyui':{'connected':False}}
+    try:
+        response=requests.get(ollama_url()+'/api/ps',timeout=3);response.raise_for_status()
+        result['ollama']={'connected':True,'models':[{'name':row.get('name') or row.get('model'),'size_vram':row.get('size_vram',0)} for row in response.json().get('models',[])]}
+    except (requests.RequestException,ValueError):pass
+    try:
+        response=requests.get(COMFYUI_URL+'/queue',timeout=3);response.raise_for_status();data=response.json()
+        if not isinstance(data.get('queue_running'),list) or not isinstance(data.get('queue_pending'),list):raise ValueError('Queue unavailable')
+        result['comfyui']={'connected':True,'running':len(data['queue_running']),'pending':len(data['queue_pending'])}
+    except (requests.RequestException,ValueError):pass
+    return result
+
+@app.post('/runtime/release')
+def release_idle_models():
+    with lock:
+        if active:raise HTTPException(409,'Wait for the gateway worker to finish before releasing models')
+        running,_=query("SELECT id FROM jobs WHERE status='running' LIMIT 1")
+        if running:raise HTTPException(409,'Resolve running job records before releasing models')
+        state=runtime_status();comfy=state['comfyui']
+        if not comfy['connected']:raise HTTPException(409,'Cannot verify the ComfyUI queue. Start/connect ComfyUI before releasing shared GPU models')
+        if comfy['running'] or comfy['pending']:raise HTTPException(409,'ComfyUI still has running or pending work. No models were released')
+        released=[];errors=[]
+        if state['ollama']['connected']:
+            for model in state['ollama']['models']:
+                try:
+                    response=requests.post(ollama_url()+'/api/generate',json={'model':model['name'],'keep_alive':0,'stream':False},timeout=30);response.raise_for_status();released.append(model['name'])
+                except requests.RequestException:errors.append('Could not unload '+str(model['name']))
+        else:errors.append('Ollama unavailable; its loaded models could not be checked')
+        try:
+            response=requests.post(COMFYUI_URL+'/free',json={'unload_models':True,'free_memory':True},timeout=10);response.raise_for_status()
+        except requests.RequestException:errors.append('ComfyUI memory release failed')
+        return {'released_models':released,'errors':errors,'message':'Idle model release requested. Memory may take a moment to fall; the next local task reloads its model.'}
