@@ -460,8 +460,11 @@ def run_worker(project_id: str, worker: str, body: RunOptions = RunOptions()):
         command += ['--stage',body.stage]
     if body.job_id:
         if worker not in {'openai-references', 'comfy-videos'}: raise HTTPException(400, 'Individual rendering is supported for OpenAI images and ComfyUI video')
-        rows, _ = query("SELECT job_type FROM jobs WHERE id=%s AND project_id=%s AND status='queued'", (body.job_id, project_id))
-        if not rows or (worker == 'comfy-videos') != (rows[0]['job_type'] == 'shot_video'): raise HTTPException(409, 'The selected queued job does not match this worker')
+        rows, _ = query("SELECT job_type,status FROM jobs WHERE id=%s AND project_id=%s", (body.job_id, project_id))
+        if not rows:raise HTTPException(404,'Selected job not found in this project')
+        if rows[0]['status']=='failed':raise HTTPException(409,'This job failed. Retry it before rendering; saved video submissions must be resolved first.')
+        if rows[0]['status']!='queued':raise HTTPException(409,'Only queued jobs can render. For a completed asset, create a new version; for running work, inspect its run.')
+        if (worker == 'comfy-videos') != (rows[0]['job_type'] == 'shot_video'): raise HTTPException(409, 'The selected job type does not match this worker')
         command += ['--job-id', str(body.job_id)]
     return start_run(command, project_id, worker)
 
