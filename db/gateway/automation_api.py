@@ -569,7 +569,7 @@ def change_video_engine(project_id:str,body:VideoEngineChange):
         project(project_id);require_idle(project_id)
         state=runtime_status()['comfyui']
         if not state.get('connected') or state.get('running') or state.get('pending'):raise HTTPException(409,'Wait for an empty, connected ComfyUI queue before changing video engines')
-        models,_=query("SELECT model_key,workflow_template_path,valid_durations,available FROM model_registry WHERE model_key=%s AND model_type='video' AND backend='comfyui'",(body.video_model_key,))
+        models,_=query("SELECT model_key,workflow_template_path,valid_durations,available,notes FROM model_registry WHERE model_key=%s AND model_type='video' AND backend='comfyui'",(body.video_model_key,))
         if not models or not models[0]['available']:raise HTTPException(400,'Install and register this video model as available first')
         model=models[0]
         if not Path(model.get('workflow_template_path') or '').is_file():raise HTTPException(400,'The registered video workflow file is missing')
@@ -577,17 +577,36 @@ def change_video_engine(project_id:str,body:VideoEngineChange):
         if any(Path(str(scoped_file(project_id,job['output_path'],ROOT))+'.comfy.json').exists() for job in jobs):raise HTTPException(409,'Recover or reset saved video submissions before changing engines')
         config,_=query('SELECT video_model_key,locked_duration_seconds FROM project_model_config WHERE project_id=%s',(project_id,))
         if not config:raise HTTPException(409,'This production has no video model configuration')
-        durations,_=query('SELECT DISTINCT COALESCE(s.duration_seconds,%s) AS duration FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s',(config[0]['locked_duration_seconds'],project_id))
-        valid=model.get('valid_durations');valid=json.loads(valid) if isinstance(valid,str) else valid
-        if valid and any(row['duration'] not in valid for row in durations):raise HTTPException(400,"The selected engine does not support this production's shot durations")
+        durations,_=query('SELECT s.shot_id,COALESCE(s.duration_seconds,%s) AS duration FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s',(config[0]['locked_duration_seconds'],project_id))
         settings=read_settings(project_id)
         updated=json.loads(json.dumps(settings)) if settings else None
+        original=(updated or {}).get('ltx_original_timing')
+        target={row['shot_id']:row['duration'] for row in durations}
+        locked=config[0]['locked_duration_seconds']
+        if body.video_model_key=='minimax-h3':
+            if not updated or not all(key in updated.get('spec',{}) for key in ('scenes_per_episode','shots_per_scene','episode_seconds')):
+                raise HTTPException(409,'Save or adopt the production setup first so original LTX timing can be preserved')
+            if not original:
+                if config[0]['video_model_key']=='minimax-h3':raise HTTPException(409,'Original LTX timings are unavailable. Restore the original plan before applying automatic timing changes')
+                original={'shots':target.copy(),'locked_duration_seconds':locked,'episode_seconds':updated['spec']['episode_seconds']}
+                updated['ltx_original_timing']=original
+            target={shot_id:10 for shot_id in target};locked=10
+            updated['spec']['episode_seconds']=10*updated['spec']['scenes_per_episode']*updated['spec']['shots_per_scene']
+        elif original:
+            if set(original['shots'])!=set(target):raise HTTPException(409,'The shot plan changed; reconcile original LTX timings before switching')
+            target=original['shots'];locked=original['locked_duration_seconds']
+            updated['spec']['episode_seconds']=original['episode_seconds']
+        valid=model.get('valid_durations');valid=json.loads(valid) if isinstance(valid,str) else valid
+        unsupported=sorted({float(value) for value in target.values() if valid and value not in valid})
+        if unsupported:raise HTTPException(400,f'The selected engine has registered duration limits {valid}; requested shot seconds {unsupported} are unsupported')
         if updated:
             updated['automation_enabled']=False
             updated['spec'].update(video_model_key=body.video_model_key,lora_mode='none',lora_name='',lora_strength=1)
         conn=mysql.connector.connect(**DB);cur=conn.cursor()
         try:
-            cur.execute('UPDATE project_model_config SET video_model_key=%s WHERE project_id=%s',(body.video_model_key,project_id))
+            for shot_id,seconds in target.items():
+                cur.execute('UPDATE shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id SET s.duration_seconds=%s WHERE sp.project_id=%s AND s.shot_id=%s',(seconds,project_id,shot_id))
+            cur.execute('UPDATE project_model_config SET video_model_key=%s,locked_duration_seconds=%s WHERE project_id=%s',(body.video_model_key,locked,project_id))
             if updated:write_settings(project_id,updated)
             conn.commit()
         except Exception:
@@ -595,7 +614,7 @@ def change_video_engine(project_id:str,body:VideoEngineChange):
             if settings:write_settings(project_id,settings)
             raise
         finally:cur.close();conn.close()
-        return {'video_model_key':body.video_model_key,'message':'Video engine saved for upcoming renders. Automation is paused and LoRA is set to None; existing clips remain available.'}
+        return {'video_model_key':body.video_model_key,'message':'Video engine and shot timing saved. MiniMax uses 10 seconds per shot; LTX restores original timings. Automation is paused; existing clips remain available and new timing applies to new renders.'}
 
 @app.get('/video-options')
 def video_options():

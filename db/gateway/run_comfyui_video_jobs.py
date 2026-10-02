@@ -135,9 +135,9 @@ def render_video(template, frame, prompt, seconds, output, job_id, lora=None):
         save_submission(output,phase='submitting',client_id=client_id,workflow=workflow,job_id=job_id)
         response=requests.post(COMFYUI_URL+'/prompt',json={'prompt':workflow,'client_id':client_id},timeout=30)
         try:response.raise_for_status()
-        except requests.HTTPError:
+        except requests.HTTPError as exc:
             if 400<=response.status_code<500:save_submission(output,phase='rejected',rejection=response.text)
-            raise
+            raise RuntimeError(f'ComfyUI rejected video submission (HTTP {response.status_code}): {response.text or str(exc)}') from exc
         prompt_id=response.json()['prompt_id']
         save_submission(output,prompt_id=prompt_id,phase='submitted')
         print(f'Submitted ComfyUI prompt {prompt_id} for job {job_id}',flush=True)

@@ -194,6 +194,15 @@ the next local task.
 
 ## Old running videos and new video versions
 
+Saving **MiniMax H3** sets every planned shot to 10 seconds and updates the
+production runtime budget and duration lock. The first switch saves original
+LTX shot durations and episode runtime in production settings. Saving **LTX 2.5**
+restores those timings. Repeated MiniMax saves preserve the original snapshot.
+Model-registry duration restrictions remain unchanged and are checked against
+the requested timings. The change pauses automation and preserves video files;
+regenerate clips to obtain new motion at the selected duration. Existing clips
+are padded or trimmed to the active shot timing during assembly.
+
 After an interrupted ComfyUI session, restart ComfyUI and verify its queue is
 empty. In **Production**, choose **Resolve old video jobs** and confirm after
 checking ComfyUI's outputs. This pauses automation and checks saved submissions.

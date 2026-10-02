@@ -10,6 +10,16 @@ import automation_api as api
 from fastapi.testclient import TestClient
 
 class VideoRecoveryTests(unittest.TestCase):
+    def test_submission_rejection_reports_node_details_and_preserves_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            frame=Path(folder)/'frame.png';frame.write_bytes(b'image');output=Path(folder)/'clip.mp4'
+            uploaded=self.response({'name':'frame.png'})
+            rejected=self.response();rejected.status_code=400;rejected.text='{"node_errors":{"393":{"errors":[{"message":"Value not in list: clip_name"}]}}}'
+            rejected.raise_for_status.side_effect=video.requests.HTTPError('400 Bad Request')
+            with patch.object(video,'submission_queue_status',return_value='absent'),patch.object(video,'patch_video',return_value={}),patch.object(video.requests,'post',side_effect=[uploaded,rejected]) as post:
+                with self.assertRaisesRegex(RuntimeError,'Value not in list: clip_name'):video.render_video(None,frame,'Action',6,output,81)
+            receipt=json.loads(Path(str(output)+'.comfy.json').read_text())
+            self.assertEqual(receipt['phase'],'rejected');self.assertEqual(receipt['rejection'],rejected.text);self.assertNotIn('prompt_id',receipt);self.assertEqual(post.call_count,2)
     def response(self,data=None,content=b'clip'):
         response=Mock();response.json.return_value=data;response.content=content;return response
     def test_completed_video_downloads_savevideo_images(self):
