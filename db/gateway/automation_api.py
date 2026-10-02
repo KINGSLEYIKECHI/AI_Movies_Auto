@@ -579,23 +579,23 @@ def change_video_engine(project_id:str,body:VideoEngineChange):
         if not config:raise HTTPException(409,'This production has no video model configuration')
         durations,_=query('SELECT s.shot_id,COALESCE(s.duration_seconds,%s) AS duration FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s',(config[0]['locked_duration_seconds'],project_id))
         settings=read_settings(project_id)
-        updated=json.loads(json.dumps(settings)) if settings else None
+        updated=json.loads(json.dumps(settings)) if settings else {'legacy':True,'planning_status':'ready','completed':[],'prompts_approved':False,'spec':{'review_mode':'every_stage'}}
+        legacy=updated.get('legacy',False)
         original=(updated or {}).get('ltx_original_timing')
         target={row['shot_id']:row['duration'] for row in durations}
         locked=config[0]['locked_duration_seconds']
         if body.video_model_key=='minimax-h3':
-            if not updated or not all(key in updated.get('spec',{}) for key in ('scenes_per_episode','shots_per_scene','episode_seconds')):
-                raise HTTPException(409,'Save or adopt the production setup first so original LTX timing can be preserved')
+            if not target:raise HTTPException(409,'This production has no planned shots to retime')
             if not original:
                 if config[0]['video_model_key']=='minimax-h3':raise HTTPException(409,'Original LTX timings are unavailable. Restore the original plan before applying automatic timing changes')
-                original={'shots':target.copy(),'locked_duration_seconds':locked,'episode_seconds':updated['spec']['episode_seconds']}
+                original={'shots':target.copy(),'locked_duration_seconds':locked,'episode_seconds':updated['spec'].get('episode_seconds')}
                 updated['ltx_original_timing']=original
             target={shot_id:10 for shot_id in target};locked=10
-            updated['spec']['episode_seconds']=10*updated['spec']['scenes_per_episode']*updated['spec']['shots_per_scene']
+            if not legacy:updated['spec']['episode_seconds']=10*updated['spec']['scenes_per_episode']*updated['spec']['shots_per_scene']
         elif original:
             if set(original['shots'])!=set(target):raise HTTPException(409,'The shot plan changed; reconcile original LTX timings before switching')
             target=original['shots'];locked=original['locked_duration_seconds']
-            updated['spec']['episode_seconds']=original['episode_seconds']
+            if not legacy:updated['spec']['episode_seconds']=original['episode_seconds']
         valid=model.get('valid_durations');valid=json.loads(valid) if isinstance(valid,str) else valid
         unsupported=sorted({float(value) for value in target.values() if valid and value not in valid})
         if unsupported:raise HTTPException(400,f'The selected engine has registered duration limits {valid}; requested shot seconds {unsupported} are unsupported')
@@ -612,6 +612,7 @@ def change_video_engine(project_id:str,body:VideoEngineChange):
         except Exception:
             conn.rollback()
             if settings:write_settings(project_id,settings)
+            else:(root(project_id)/'production.json').unlink(missing_ok=True)
             raise
         finally:cur.close();conn.close()
         return {'video_model_key':body.video_model_key,'message':'Video engine and shot timing saved. MiniMax uses 10 seconds per shot; LTX restores original timings. Automation is paused; existing clips remain available and new timing applies to new renders.'}

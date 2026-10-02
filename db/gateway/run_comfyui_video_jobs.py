@@ -192,8 +192,10 @@ def main():
                     if not 1<=scene<=spec.scenes_per_episode or not 1<=shot<=spec.shots_per_scene:raise RuntimeError('Shot outside configured production')
                     expected=budget(spec)[(scene-1)*spec.shots_per_scene+shot-1]
                     if seconds!=expected:raise RuntimeError('Shot duration differs from the approved production budget')
-                elif seconds!=model['locked_duration_seconds']:
-                    raise RuntimeError('Shot duration differs from the project lock; correct the plan before rendering')
+                else:
+                    original=(settings or {}).get('ltx_original_timing',{}).get('shots',{})
+                    expected=original.get(job['shot_id'],model['locked_duration_seconds']) if model['model_key']=='ltx-2.5' else model['locked_duration_seconds']
+                    if seconds!=expected:raise RuntimeError('Shot duration differs from the saved engine timing; correct the plan before rendering')
                 prompt=re.sub(r'^\[source_image:.*?\]\s*','',job['prompt'] or job['video_prompt'])
                 options = read_options(project, job['output_path'])
                 frame = job['frame']

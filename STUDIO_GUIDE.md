@@ -203,6 +203,27 @@ the requested timings. The change pauses automation and preserves video files;
 regenerate clips to obtain new motion at the selected duration. Existing clips
 are padded or trimmed to the active shot timing during assembly.
 
+Older projects do not need to be recreated or adopted before switching. The
+gateway creates minimal legacy production settings when missing, and captures
+each original shot duration from MySQL. Existing minimal legacy settings are
+also supported. Mixed original durations are restored and respected by the
+video worker. If a switch fails, database updates are rolled back and the prior
+settings file is restored.
+
+Persistence locations:
+
+- MySQL `project_model_config.video_model_key`: current video engine.
+- MySQL `project_model_config.locked_duration_seconds`: active duration lock
+  (10 for MiniMax; original lock for LTX).
+- MySQL `shots.duration_seconds`: active duration for each project shot, scoped
+  through `scene_plan.project_id`.
+- Project `production.json`: `ltx_original_timing` stores original per-shot
+  timings, duration lock and, for newer projects, the original episode budget.
+  `spec.video_model_key` mirrors the selection and `automation_enabled` is false
+  after switching. This file is persisted under `PROJECTS_BASE_PATH`.
+- `model_registry.valid_durations` holds model restrictions and is not altered
+  by switching.
+
 After an interrupted ComfyUI session, restart ComfyUI and verify its queue is
 empty. In **Production**, choose **Resolve old video jobs** and confirm after
 checking ComfyUI's outputs. This pauses automation and checks saved submissions.

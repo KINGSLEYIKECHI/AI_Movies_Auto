@@ -10,6 +10,15 @@ import automation_api as api
 from fastapi.testclient import TestClient
 
 class VideoRecoveryTests(unittest.TestCase):
+    def test_legacy_ltx_renders_restored_mixed_durations(self):
+        with tempfile.TemporaryDirectory() as folder:
+            template=Path(folder)/'workflow.json';template.write_text('{}')
+            conn=Mock();cur=conn.cursor.return_value;cur.rowcount=1
+            cur.fetchone.return_value={'model_key':'ltx-2.5','workflow_template_path':str(template),'locked_duration_seconds':6}
+            cur.fetchall.return_value=[dict(id=i,shot_id=f'shot_{i}',duration_seconds=seconds,prompt='Action',video_prompt='Action',output_path=str(Path(folder)/f'{i}.mp4'),frame='frame.png',asset_id=i+10) for i,seconds in [(1,6),(2,8)]]
+            settings={'legacy':True,'spec':{'video_model_key':'ltx-2.5'},'ltx_original_timing':{'shots':{'shot_1':6,'shot_2':8}}}
+            with patch.object(video.sys,'argv',['worker','film','--limit','2']),patch.object(video.mysql.connector,'connect',return_value=conn),patch.object(video,'read_settings',return_value=settings),patch.object(video,'read_options',return_value={}),patch.object(video,'render_video') as render,patch.object(video,'record_video'),patch.object(video,'release_video_memory',return_value=True):video.main()
+            self.assertEqual([call.args[3] for call in render.call_args_list],[6,8])
     def test_submission_rejection_reports_node_details_and_preserves_receipt(self):
         with tempfile.TemporaryDirectory() as folder:
             frame=Path(folder)/'frame.png';frame.write_bytes(b'image');output=Path(folder)/'clip.mp4'
