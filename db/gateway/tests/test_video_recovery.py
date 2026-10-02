@@ -7,9 +7,14 @@ from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import run_comfyui_video_jobs as video
 import automation_api as api
+from video_direction import Direction
 from fastapi.testclient import TestClient
 
 class VideoRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        # These tests exercise submission recovery, not ffmpeg or direction providers.
+        self.patches=[patch.object(video,'dialogue_rows',return_value=[]),patch.object(video,'quality_report',return_value={'warnings':[]}),patch.object(video,'apply_audio'),patch.object(video,'read_direction',return_value=Direction())]
+        for value in self.patches:value.start();self.addCleanup(value.stop)
     def test_legacy_ltx_renders_restored_mixed_durations(self):
         with tempfile.TemporaryDirectory() as folder:
             template=Path(folder)/'workflow.json';template.write_text('{}')

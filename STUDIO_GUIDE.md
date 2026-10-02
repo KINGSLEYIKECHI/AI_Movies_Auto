@@ -1,5 +1,88 @@
 # DuPac Film Studio
 
+## Dialogue, audio and continuity
+
+In **Production**, expand **Dialogue, sound & shot continuity**. The default
+enables dialogue and foreground sound effects, disables ambient sound and
+music, and leaves optional paid speech services off. Save the settings before
+rendering replacement video versions. Existing media are preserved.
+
+Select a shot to edit its exact spoken lines, character IDs, starting state,
+completed ending state, and effects description. **Draft dialogue & ending
+with the local model** creates an editable suggestion; it does not save until
+you choose **Save shot dialogue & ending state**. New movie planning also asks
+for achievable actions, dialogue and settled endings. Silent shots stay silent
+unless dialogue is supplied; existing stories are not rewritten automatically.
+
+The renderer reads `shot_dialogue` and includes speaker names, stable speaker
+IDs, language and exact lines in its computed instructions. It rejects speech
+that is too long for the available shot time. The final second is reserved for
+settling after action and speech. The model still needs human review to verify
+that the action actually finishes and the lips match.
+
+Continuity modes:
+
+- **Continuous action** extracts a frame near the preceding video's end and
+  uses it as the next clip's starting image. Only shots in the same scene are
+  linked. By default a preceding candidate or accepted video can be used; turn
+  on accepted-only continuity to require review before the next clip.
+- **New angle** uses the approved planned shot image and preceding shot prompt
+  and saved ending-state context. It does not automatically redraw the planned
+  image; revise that image if it contradicts the preceding ending state.
+- **New scene** uses the planned image without carrying the prior scene frame.
+- An explicitly uploaded starting frame takes precedence over the automatic
+  continuity frame. Previous-frame asset lineage is saved on the video job.
+
+Native audio uses model prompting, so ambience/music removal and identical
+voices are not guaranteed. **Separate audio** discards the entire generated
+mixed track and combines only enabled uploaded stems and optional synthesised
+dialogue. Effects must be supplied separately; the pipeline refuses to silently
+discard required effects. Audio uploads accept WAV, MP3, M4A, FLAC and OGG up to
+20 MB, scoped to the selected project.
+
+Optional OpenAI speech requires `OPENAI_API_KEY`, explicit speech-provider
+selection and per-character voice choices. It incurs API usage charges and
+uses AI-generated voices. `SPEECH_MODEL` defaults to `gpt-4o-mini-tts`; speech
+is cached by text, language, model and voice. Generated dialogue that does not
+fit is rejected rather than cut short. Optional transcript checks use
+`SPEECH_CHECK_MODEL` (default `gpt-4o-mini-transcribe`) and also incur charges.
+Word coverage is a review aid, not proof of pronunciation or speaker accuracy.
+
+On-screen separate dialogue requires a separately installed lip-sync backend.
+Configure `LIPSYNC_COMMAND_JSON` in `db/.env` as a JSON argument array for a
+trusted executable available inside the gateway container. Include `{video}`,
+`{audio}` and `{output}` placeholders. The command receives the silent source
+video, the completed dialogue stem, and a new output path. It is invoked
+without a shell. No lip-sync model is installed by this change. Off-screen
+voiceover works without lip-sync. Configure a backend suitable for your scene,
+especially for multiple visible speakers.
+
+If music is enabled, upload and select one episode music track. Assembly loops
+and mixes that track across the entire episode at a fixed low gain, rather
+than asking each video model to invent a separate tune. Dialogue, effects and
+ambience stems are selected per shot. The original generated mix is retained
+as `.raw.mp4` when separate processing is used.
+
+Each new video receives duration, audio-presence and near-silence checks, plus
+optional transcription. Review shows the report and exact submitted prompt.
+Acceptance requires confirming that action/dialogue finish before the cut.
+Strict exports refuse noticeable duration mismatch or recorded quality
+warnings. Disabling strict checks deliberately permits trimming/padding.
+Semantic action completion is checked by the reviewer, not a vision model.
+Audio/quality-processing failures can retry the saved video without another
+ComfyUI submission. Fix the direction settings or missing backend first.
+
+Persistence: dialogue is in MySQL `shot_dialogue`; direction settings are in
+project `video_direction.json` and `shot_direction.json`; uploaded stems are
+under `audio_inputs`; quality reports are beside each clip as `.quality.json`
+and copied into `asset_records.metadata.quality`. The existing project cleanup
+removes these project-scoped files as well. No database migration is required.
+
+Rebuild the gateway with both compose files after transferring the updated
+source, then reload the Studio with Ctrl+Shift+R. Test one replacement clip
+before enabling full automatic production. Native models, paid speech calls
+and installed lip-sync need validation on the build machine.
+
 The studio starts a new production from your movie idea. Open
 http://localhost:8000/review after starting the automation stack.
 

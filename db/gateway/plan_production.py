@@ -109,7 +109,7 @@ def main():
         for ep in range(1,spec.episodes+1):
             stage_call(spec,f'episode_{ep:03d}_scenes','SCENE_PLAN',scene_prompt(project,ep,spec.scenes_per_episode)+f'\nProduction direction: {spec.direction}\nTarget episode runtime: {spec.episode_seconds} seconds.',ep)
             for sc in range(1,spec.scenes_per_episode+1):
-                stage_call(spec,f'episode_{ep:03d}_scene_{sc:02d}_shots','SHOT_PLAN',shot_prompt(project,ep,sc,spec.shots_per_scene,durations[(sc-1)*spec.shots_per_scene:sc*spec.shots_per_scene])+f'\nVisual style: {spec.visual_style}\nVideo engine: {spec.video_model_key}\nProduction direction: {spec.direction}',ep,sc)
+                stage_call(spec,f'episode_{ep:03d}_scene_{sc:02d}_shots','SHOT_PLAN',shot_prompt(project,ep,sc,spec.shots_per_scene,durations[(sc-1)*spec.shots_per_scene:sc*spec.shots_per_scene])+f'\nVisual style: {spec.visual_style}\nVideo engine: {spec.video_model_key}\nProduction direction: {spec.direction}\nPlan one achievable action per shot, completed before its last second. Include exact spoken lines and character IDs in the dialogue array where dialogue advances the story; also include delivery in video_prompt. Carry positions, props, lighting and movement direction from the preceding shot. Leave a settled ending hold. Foreground effects only, without a music score or ambient bed.',ep,sc)
         for kind in ('references','shot-images'):
             subprocess.run([sys.executable,str(HERE/'enqueue_asset_jobs.py'),project,kind],check=True)
         settings=read_settings(project);settings.update(planning_status='ready',planning_stage='complete',prompts_approved=False);write_settings(project,settings)

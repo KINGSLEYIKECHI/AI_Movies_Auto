@@ -32,6 +32,10 @@ if video_fixture:
 def query(sql,params=()):
  global fixture_refreshes
  p=params[0] if params else 'preview_workshop'
+ if sql.startswith('SELECT s.shot_id,s.duration_seconds,s.scene_id'):return [{'shot_id':'preview_workshop_EP_001_SC_01_SH_01','duration_seconds':10,'scene_id':'scene_1'}],1
+ if sql.startswith('SELECT s.shot_id,s.video_prompt,s.duration_seconds'):return [{'shot_id':params[1],'video_prompt':'Kemi opens the workshop door and settles in the doorway.','duration_seconds':10}],1
+ if sql.startswith('SELECT character_id,name FROM characters') or sql.startswith('SELECT character_id FROM characters'):return [{'character_id':'KEMI'}],1
+ if sql.startswith('SELECT character_id,line FROM shot_dialogue'):return [{'character_id':'KEMI','line':'Who is there?'}],1
  if sql.startswith('SELECT s.shot_id,s.scene_id,s.character_ids'):
   return [dict(shot_id=params[1],scene_id=p+'__EP_001_SC_01',character_ids='["CHAR_001","CHAR_002"]',location_id='LOC_001')],1
  if sql.startswith('SELECT a.id,a.asset_type'):

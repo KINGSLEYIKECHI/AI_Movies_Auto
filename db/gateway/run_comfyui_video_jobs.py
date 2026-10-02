@@ -12,6 +12,7 @@ import mysql.connector
 from run_comfyui_reference_jobs import DB, COMFYUI_URL
 from production_control import ProductionSpec, budget, read_settings
 from asset_control import read_options, upload_reference
+from video_direction import read_direction,read_shot_direction,dialogue_rows,compile_prompt,predecessor,continuity_frame,apply_audio,quality_report,validate_resources
 
 def patch_video(template, image, prompt, seconds, prefix, lora=None):
     workflow = json.loads(template.read_text(encoding='utf-8'))
@@ -132,7 +133,7 @@ def render_video(template, frame, prompt, seconds, output, job_id, lora=None):
         image='/'.join(x for x in [uploaded.get('subfolder'),uploaded['name']] if x)
         workflow=patch_video(template,image,prompt,seconds,f'film/job_{job_id}',lora)
         client_id=str(uuid.uuid4())
-        save_submission(output,phase='submitting',client_id=client_id,workflow=workflow,job_id=job_id)
+        save_submission(output,phase='submitting',client_id=client_id,workflow=workflow,job_id=job_id,effective_prompt=prompt)
         response=requests.post(COMFYUI_URL+'/prompt',json={'prompt':workflow,'client_id':client_id},timeout=30)
         try:response.raise_for_status()
         except requests.HTTPError as exc:
@@ -199,17 +200,39 @@ def main():
                 prompt=re.sub(r'^\[source_image:.*?\]\s*','',job['prompt'] or job['video_prompt'])
                 options = read_options(project, job['output_path'])
                 frame = job['frame']
+                direction=read_direction(project);shot_direction=read_shot_direction(project,job['shot_id'])
+                lines=dialogue_rows(cur,project,job['shot_id'])
+                validate_resources(project,lines,direction,shot_direction)
+                transition=shot_direction.transition if shot_direction.transition!='default' else direction.continuity
+                previous=predecessor(cur,project,job,direction.require_approved_previous) if transition in {'continuous','new_angle'} else None
+                if previous:
+                    ending=read_shot_direction(project,previous['shot_id']).end_state
+                    if ending:previous['video_prompt']+=' Ending state: '+ending
+                prompt=compile_prompt(prompt,seconds,lines,direction,shot_direction,model['model_key'],previous['video_prompt'] if previous else '')
+                previous_asset_id=None
+                if transition=='continuous' and previous:
+                    frame=str(continuity_frame(project,job,previous));previous_asset_id=previous['asset']['id']
                 if options.get('reference_upload_ids'):
                     _, frame = upload_reference(project, options['reference_upload_ids'][0])
                 render_video(template,frame,prompt,seconds,job['output_path'],job['id'],spec.model_dump() if spec else None)
-                record_video(cur,project,job,model['model_key'],bool(options.get('reference_upload_ids')))
-                conn.commit();print(f"Created video candidate for job {job['id']}",flush=True)
+                prompt=json.loads(Path(str(job['output_path'])+'.comfy.json').read_text(encoding='utf-8')).get('effective_prompt',prompt) if Path(str(job['output_path'])+'.comfy.json').exists() else prompt
+                save_submission(job['output_path'],phase='postprocessing',effective_prompt=prompt,direction=direction.model_dump(),shot_direction=shot_direction.model_dump(),previous_asset_id=previous_asset_id)
                 if os.getenv('RELEASE_VIDEO_MEMORY','1') != '0':
                     try:
                         released=release_video_memory()
                         print('Idle ComfyUI model unload requested.' if released else 'Memory unload skipped: ComfyUI queue still has work.',flush=True)
                     except Exception as exc:print(f'Video saved; memory unload warning: {exc}',flush=True)
-
+                try:
+                    apply_audio(project,job['output_path'],lines,direction,shot_direction,seconds)
+                    report=quality_report(job['output_path'],seconds,lines,direction)
+                    report['effective_prompt']=prompt
+                except Exception:
+                    save_submission(job['output_path'],phase='processing_failed');raise
+                save_submission(job['output_path'],phase='ready')
+                record_video(cur,project,job,model['model_key'],bool(options.get('reference_upload_ids') or previous_asset_id))
+                if previous_asset_id:cur.execute("INSERT IGNORE INTO job_asset_references(job_id,asset_id,reference_role) VALUES(%s,%s,'previous_shot')",(job['id'],previous_asset_id))
+                cur.execute("UPDATE asset_records SET metadata=JSON_SET(COALESCE(metadata,JSON_OBJECT()),'$.quality',CAST(%s AS JSON)) WHERE project_id=%s AND job_id=%s",(json.dumps(report),project,job['id']))
+                conn.commit();print(f"Created video candidate for job {job['id']}",flush=True)
             except Exception as exc:
                 conn.rollback();cur.execute("UPDATE jobs SET status='failed',error=%s WHERE id=%s",(str(exc),job['id']));conn.commit();failed=True;print(f"FAILED {job['id']}: {exc}",flush=True)
                 print('Batch paused after this failure. Remaining video jobs stay queued.',flush=True)

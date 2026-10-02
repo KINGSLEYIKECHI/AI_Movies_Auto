@@ -54,6 +54,12 @@ Visual style: {spec.visual_style}
 Each episode has {spec.scenes_per_episode} scenes and {spec.shots_per_scene} shots per scene.
 Target runtime per episode: {spec.episode_seconds} seconds.
 Video engine: {spec.video_model_key}. Dialogue must fit the shot lengths.
+Each shot has one achievable action, a clear starting state and a completed
+ending state. Finish action and speech before the final second and leave a
+settled ending hold. Preserve positions, props, wardrobe, lighting and screen
+direction between shots. Put exact dialogue and speaker character IDs in the
+dialogue array as well as the video prompt. Foreground effects only; no score
+or ambient bed by default.
 Establish the canonical wardrobe and important props in wardrobe and props arrays.
 {spec.direction}
 '''

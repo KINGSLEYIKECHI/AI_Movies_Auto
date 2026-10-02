@@ -7,6 +7,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
+from typing import Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ import mysql.connector
 from asset_control import IMAGE_TYPES, MAX_UPLOAD_BYTES, UNRESOLVED_REJECTIONS, project_folder, scoped_file, save_upload, upload_reference, write_options, read_options
 from project_cleanup import delete_project, recover_cleanup
 from shot_references import context as shot_context, library as reference_library, selected_assets
+from video_direction import Direction,ShotDirection,VOICES,read_direction,write_direction,read_shot_direction,write_shot_direction,save_audio,audio_file,compile_prompt
 
 DB = {"host": os.getenv("MYSQL_HOST", "mysql"), "port": int(os.getenv("MYSQL_PORT", "3306")),
       "user": os.getenv("MYSQL_USER", "glm_user"), "password": os.getenv("MYSQL_PASSWORD", "changeme"),
@@ -32,6 +34,7 @@ active = False
 
 class Review(BaseModel):
     status: str
+    action_complete: bool=False
 
 class AssetRevision(BaseModel):
     prompt: str | None = Field(default=None, min_length=1, max_length=24000)
@@ -180,7 +183,7 @@ def review_assets(project_id: str, status: str = "candidate"):
     project(project_id)
     if status not in {"candidate", "approved", "rejected", "superseded"}:
         raise HTTPException(400, "Invalid asset status")
-    rows, _ = query("SELECT id,status,asset_type,entity_id,output_path,generation_model,created_at FROM asset_records WHERE project_id=%s AND status=%s ORDER BY id", (project_id, status))
+    rows, _ = query("SELECT id,status,asset_type,entity_id,output_path,generation_model,created_at,metadata FROM asset_records WHERE project_id=%s AND status=%s ORDER BY id", (project_id, status))
     for row in rows: row["preview_url"] = f"/projects/{project_id}/assets/{row['id']}/file"
     return {"assets": rows}
 
@@ -204,10 +207,14 @@ def review_asset(project_id: str, asset_id: int, body: Review):
             cur.execute('SELECT * FROM asset_records WHERE id=%s AND project_id=%s FOR UPDATE', (asset_id, project_id))
             asset = cur.fetchone()
             if not asset: raise HTTPException(404, 'Asset not found')
+            metadata=asset.get('metadata') or {}
+            if isinstance(metadata,str):metadata=json.loads(metadata)
+            if body.status=='approved' and asset['asset_type']=='shot_video' and metadata.get('quality') and not body.action_complete:raise HTTPException(400,'Confirm that the action and dialogue finish before accepting this video')
             if asset['status'] == body.status: return {'id': asset_id, 'status': body.status, 'affected_assets': 0}
             # Changing an approved choice or rejecting a candidate pauses automatic work.
             if body.status == 'rejected' or asset['status'] in {'approved', 'superseded'}: pause_for_change(project_id)
             if body.status == 'approved':
+                if asset['asset_type']=='shot_video' and body.action_complete:cur.execute("UPDATE asset_records SET metadata=JSON_SET(COALESCE(metadata,JSON_OBJECT()),'$.action_complete',TRUE) WHERE id=%s AND project_id=%s",(asset_id,project_id))
                 cur.execute("UPDATE asset_records SET status='superseded' WHERE project_id=%s AND asset_type=%s AND entity_id <=> %s AND status='approved' AND id<>%s", (project_id, asset['asset_type'], asset['entity_id'], asset_id))
             cur.execute('UPDATE asset_records SET status=%s,reviewed_at=NOW() WHERE id=%s AND project_id=%s', (body.status, asset_id, project_id))
             # A reference change requires checking already-produced descendants again.
@@ -237,6 +244,10 @@ def retry(project_id: str, job_id: int):
             output=scoped_file(project_id,rows[0]['output_path'],ROOT)
             sidecar=Path(str(output)+'.comfy.json')
             if sidecar.is_file():
+                phase=json.loads(sidecar.read_text(encoding='utf-8')).get('phase')
+                if phase in {'processing_failed','postprocessing'}:
+                    query("UPDATE jobs SET status='queued',error=NULL WHERE id=%s AND project_id=%s AND status='failed'",(job_id,project_id))
+                    return {'id':job_id,'status':'queued','message':'Retry audio and quality processing using the saved video; no new render submitted'}
                 try: _,record=saved_video(output)
                 except (ValueError,KeyError,OSError,requests.RequestException) as exc:raise HTTPException(409,str(exc))
                 if not record or record.get('status',{}).get('status_str')!='error':
@@ -256,6 +267,10 @@ def recover_video(project_id:str,job_id:int):
         job=jobs[0]
         try:
             output=scoped_file(project_id,job['output_path'],ROOT)
+            receipt=Path(str(output)+'.comfy.json')
+            if receipt.exists() and json.loads(receipt.read_text(encoding='utf-8')).get('phase') in {'processing_failed','postprocessing'}:
+                query("UPDATE jobs SET status='failed',error=%s WHERE project_id=%s AND id=%s",('Interrupted audio/quality processing. Fix direction settings and retry the saved video.',project_id,job_id))
+                return {'status':'failed','message':'Saved video needs audio/quality processing. Fix direction settings and retry; the saved video is reused without a new GPU render.'}
             prompt_id,record=saved_video(output)
             if not record and not has_saved_video(output):
                 phase=submission_queue_status(prompt_id)
@@ -271,6 +286,8 @@ def recover_video(project_id:str,job_id:int):
             cur.execute("SELECT id AS asset_id FROM asset_records WHERE project_id=%s AND entity_id=%s AND asset_type='shot_image' AND status='approved' ORDER BY id DESC LIMIT 1",(project_id,job['shot_id']))
             frame=cur.fetchone();job['asset_id']=frame['asset_id'] if frame else None
             record_video(cur,project_id,job,job.get('model_used'),bool(read_options(project_id,str(output),ROOT).get('reference_upload_ids')))
+            quality=Path(str(output)+'.quality.json')
+            if quality.exists():cur.execute("UPDATE asset_records SET metadata=JSON_SET(COALESCE(metadata,JSON_OBJECT()),'$.quality',CAST(%s AS JSON)) WHERE project_id=%s AND job_id=%s",(quality.read_text(encoding='utf-8'),project_id,job_id))
             conn.commit()
         except Exception:conn.rollback();raise
         finally:cur.close();conn.close()
@@ -552,6 +569,115 @@ def production_exports(project_id: str):
 def models():
     rows,_=query('SELECT model_key,model_type,backend,display_name,available FROM model_registry ORDER BY model_type,model_key')
     return {'models':rows,'default_image_model':os.getenv('OPENAI_IMAGE_MODEL','')}
+
+@app.get('/projects/{project_id}/video-direction')
+def get_video_direction(project_id:str):
+    project(project_id)
+    folder=project_folder(project_id,ROOT)/'audio_inputs'
+    uploads=[json.loads(path.read_text(encoding='utf-8')) for path in folder.glob('*.json')] if folder.exists() else []
+    shots,_=query('SELECT s.shot_id,s.duration_seconds,s.scene_id FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s ORDER BY sp.episode_id,sp.scene_number,s.shot_id',(project_id,))
+    characters,_=query('SELECT character_id,name FROM characters WHERE project_id=%s ORDER BY character_id',(project_id,))
+    return {'settings':read_direction(project_id,ROOT).model_dump(),'shots':shots,'characters':characters,'uploads':uploads,'voices':VOICES,'speech_available':bool(os.getenv('OPENAI_API_KEY')),'lipsync_available':bool(os.getenv('LIPSYNC_COMMAND_JSON'))}
+
+@app.put('/projects/{project_id}/video-direction')
+def put_video_direction(project_id:str,body:Direction):
+    with lock:
+        project(project_id);require_idle(project_id)
+        if any(voice not in VOICES for voice in body.voices.values()):raise HTTPException(400,'Choose a supported voice')
+        if body.music and not body.episode_music_id:raise HTTPException(400,'Upload and select one continuous episode music track before enabling music')
+        if (body.speech_provider=='openai' or body.verify_speech) and not os.getenv('OPENAI_API_KEY'):raise HTTPException(400,'Configure OPENAI_API_KEY before enabling speech generation or transcript checks')
+        if body.episode_music_id:
+            try:record,_=audio_file(project_id,body.episode_music_id,ROOT)
+            except (ValueError,OSError) as exc:raise HTTPException(400,str(exc))
+            if record['role']!='music':raise HTTPException(400,'Select an episode music upload')
+        pause_for_change(project_id);write_direction(project_id,body,ROOT)
+        return {'saved':True,'message':'Audio and continuity settings saved for new renders. Existing mixed audio is unchanged.'}
+
+class AudioUpload(BaseModel):
+    name:str=Field(max_length=255)
+    data:str=Field(max_length=28*1024*1024)
+    role:Literal['dialogue','effects','ambience','music']
+
+@app.post('/projects/{project_id}/audio-inputs',status_code=201)
+def upload_audio_input(project_id:str,body:AudioUpload):
+    with lock:
+        project(project_id);require_idle(project_id)
+        try:return save_audio(project_id,body.data,body.name,body.role,ROOT)
+        except (ValueError,OSError,subprocess.SubprocessError) as exc:raise HTTPException(400,'Audio upload could not be decoded: '+str(exc))
+
+@app.get('/projects/{project_id}/audio-inputs/{identifier}/file')
+def get_audio_input(project_id:str,identifier:str):
+    project(project_id)
+    try:_,path=audio_file(project_id,identifier,ROOT)
+    except (ValueError,OSError) as exc:raise HTTPException(404,str(exc))
+    return FileResponse(path)
+
+class DialogueEntry(BaseModel):
+    character_id:str|None=Field(default=None,max_length=128)
+    line:str=Field(min_length=1,max_length=4096)
+
+class ShotPackage(BaseModel):
+    direction:ShotDirection=Field(default_factory=ShotDirection)
+    dialogue:list[DialogueEntry]=Field(default_factory=list,max_length=30)
+
+def direction_shot(project_id,shot_id):
+    rows,_=query('SELECT s.shot_id,s.video_prompt,s.duration_seconds FROM shots s JOIN scene_plan sp ON sp.scene_id=s.scene_id WHERE sp.project_id=%s AND s.shot_id=%s',(project_id,shot_id))
+    if not rows:raise HTTPException(404,'Shot not found in this project')
+    return rows[0]
+
+@app.get('/projects/{project_id}/shots/{shot_id}/direction')
+def get_shot_package(project_id:str,shot_id:str):
+    project(project_id);shot=direction_shot(project_id,shot_id)
+    lines,_=query('SELECT character_id,line FROM shot_dialogue WHERE shot_id=%s ORDER BY line_order,id',(shot_id,))
+    direction=read_shot_direction(project_id,shot_id,ROOT);config=read_direction(project_id,ROOT)
+    try:prompt=compile_prompt(shot['video_prompt'],shot['duration_seconds'] or 10,lines,config,direction,'preview')
+    except ValueError as exc:prompt=str(exc)
+    return {'direction':direction.model_dump(),'dialogue':lines,'effective_prompt':prompt}
+
+@app.put('/projects/{project_id}/shots/{shot_id}/direction')
+def put_shot_package(project_id:str,shot_id:str,body:ShotPackage):
+    with lock:
+        project(project_id);require_idle(project_id);shot=direction_shot(project_id,shot_id)
+        for role in ('dialogue','effects','ambience'):
+            identifier=getattr(body.direction,role+'_audio_id')
+            if identifier:
+                try:record,_=audio_file(project_id,identifier,ROOT)
+                except (ValueError,OSError) as exc:raise HTTPException(400,str(exc))
+                if record['role']!=role:raise HTTPException(400,'Audio upload has the wrong role')
+        config=read_direction(project_id,ROOT)
+        ids={row.character_id for row in body.dialogue if row.character_id}
+        if ids:
+            characters,_=query('SELECT character_id FROM characters WHERE project_id=%s',(project_id,))
+            if not ids<={row['character_id'] for row in characters}:raise HTTPException(400,'Choose character IDs belonging to this production')
+        if config.audio_mode=='separate' and any(row.character_id for row in body.dialogue) and not body.direction.voiceover and not os.getenv('LIPSYNC_COMMAND_JSON'):raise HTTPException(400,'Configure a lip-sync backend for on-screen separate speech, or choose off-screen voiceover')
+        try:compile_prompt(shot['video_prompt'],shot['duration_seconds'] or 10,[row.model_dump() for row in body.dialogue],config,body.direction,'preview')
+        except ValueError as exc:raise HTTPException(400,str(exc))
+        previous=read_shot_direction(project_id,shot_id,ROOT)
+        conn=mysql.connector.connect(**DB);cur=conn.cursor()
+        try:
+            cur.execute('DELETE FROM shot_dialogue WHERE shot_id=%s',(shot_id,))
+            for i,row in enumerate(body.dialogue):cur.execute('INSERT INTO shot_dialogue(shot_id,character_id,line,line_order) VALUES(%s,%s,%s,%s)',(shot_id,row.character_id,row.line,i+1))
+            pause_for_change(project_id);write_shot_direction(project_id,shot_id,body.direction,ROOT);conn.commit()
+        except Exception:
+            conn.rollback();write_shot_direction(project_id,shot_id,previous,ROOT);raise
+        finally:cur.close();conn.close()
+        return {'saved':True,'message':'Shot dialogue and continuity saved. Regenerate its video to apply changes.'}
+
+@app.post('/projects/{project_id}/shots/{shot_id}/suggest-direction')
+def suggest_shot_direction(project_id:str,shot_id:str):
+    project(project_id);require_idle(project_id);shot=direction_shot(project_id,shot_id)
+    characters,_=query('SELECT character_id,name FROM characters WHERE project_id=%s',(project_id,))
+    config=read_direction(project_id,ROOT)
+    prompt=f"Draft one achievable shot ending and optional short dialogue for this shot: {shot['video_prompt']}. Duration: {shot['duration_seconds']} seconds; finish at least {config.ending_hold} second early. Language: {config.language}. Available characters: {json.dumps(characters)}. Return JSON keys start_state, end_state, effects_description, dialogue (array of character_id and line). Do not invent new characters; use dialogue only when it advances this scene. No music or ambience."
+    try:
+        response=requests.post(ollama_url()+'/api/generate',json={'model':os.getenv('MODEL_NAME','glm-film-director'),'prompt':prompt,'format':'json','stream':False},timeout=180);response.raise_for_status()
+        data=json.loads(response.json()['response'])
+        package=ShotPackage(direction=ShotDirection(**{key:data.get(key,'') for key in ('start_state','end_state','effects_description')}),dialogue=data.get('dialogue',[]))
+        allowed={row['character_id'] for row in characters}
+        if any(row.character_id and row.character_id not in allowed for row in package.dialogue):raise ValueError('Suggestion used unknown character IDs')
+        compile_prompt(shot['video_prompt'],shot['duration_seconds'] or 10,[row.model_dump() for row in package.dialogue],config,package.direction,'preview')
+        return package.model_dump()
+    except (ValueError,KeyError,requests.RequestException) as exc:raise HTTPException(502,'Local dialogue suggestion failed: '+str(exc))
 
 class VideoEngineChange(BaseModel):
     video_model_key: str = Field(pattern=r'^(ltx-2\.5|minimax-h3)$')
