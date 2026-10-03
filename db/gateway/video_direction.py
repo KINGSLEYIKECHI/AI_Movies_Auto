@@ -40,6 +40,7 @@ class ShotDirection(BaseModel):
     end_state: str=Field(default='',max_length=2000)
     effects_description: str=Field(default='Only sounds caused by the visible actions.',max_length=1000)
     voiceover: bool=False
+    simultaneous_dialogue: bool=False
     dialogue_audio_id: str | None=None
     effects_audio_id: str | None=None
     ambience_audio_id: str | None=None
@@ -93,7 +94,7 @@ def dialogue_rows(cur,project,shot):
     cur.execute('SELECT d.character_id,d.line,d.line_order,c.name AS speaker_name FROM shot_dialogue d JOIN shots s ON s.shot_id=d.shot_id JOIN scene_plan sp ON sp.scene_id=s.scene_id LEFT JOIN characters c ON c.character_id=d.character_id AND c.project_id=sp.project_id WHERE sp.project_id=%s AND d.shot_id=%s ORDER BY d.line_order,d.id',(project,shot))
     return cur.fetchall()
 
-def validate_resources(project,lines,config,shot,base=None):
+def validate_resources(project,lines,config,shot,base=None,seconds=None):
     if (config.verify_speech or config.speech_provider=='openai') and not os.getenv('OPENAI_API_KEY'):raise ValueError('Configure OPENAI_API_KEY for optional speech services')
     if config.audio_mode!='separate':return
     if config.dialogue and lines:
@@ -103,26 +104,52 @@ def validate_resources(project,lines,config,shot,base=None):
     for role in ('dialogue','effects','ambience'):
         identifier=getattr(shot,role+'_audio_id')
         if identifier:
-            record,_=audio_file(project,identifier,base)
+            record,path=audio_file(project,identifier,base)
             if record['role']!=role:raise ValueError('Audio upload has the wrong role')
+            if role=='dialogue' and config.dialogue and seconds is not None and duration(path)>float(seconds)-config.ending_hold:
+                raise ValueError('Uploaded dialogue exceeds the speaking window before the ending hold. Shorten the track (including trailing silence) or increase shot duration.')
+
+def dialogue_windows(seconds,lines,config,shot):
+    """Planning estimates for native speech; measured TTS timing is checked separately."""
+    deadline=float(seconds)-config.ending_hold
+    if deadline<=0:raise ValueError('Shot is too short for its ending hold')
+    weights=[max(1,len(row['line'].split())) for row in lines]
+    gap=0 if shot.simultaneous_dialogue else 0.15
+    needed=(max(weights,default=0) if shot.simultaneous_dialogue else sum(weights))/2.5+gap*max(0,len(lines)-1)
+    if needed>deadline:raise ValueError('Dialogue is too long for this shot, including speaker turns and ending hold. Shorten the lines or increase duration before rendering.')
+    if not weights:return []
+    available=deadline-gap*max(0,len(lines)-1)
+    start=0;windows=[]
+    for weight in weights:
+        end=deadline if shot.simultaneous_dialogue else start+available*weight/sum(weights)
+        windows.append((round(start,3),round(end,3)))
+        start=0 if shot.simultaneous_dialogue else end+gap
+    return windows
 
 def compile_prompt(prompt,seconds,lines,config,shot,model,previous_prompt=''):
     usable=float(seconds)-config.ending_hold
     if usable<=0:raise ValueError('Shot is too short for its ending hold')
     spoken=[row for row in lines if row.get('line')] if config.dialogue else []
-    if sum(len(row['line'].split()) for row in spoken)>usable*2.5:
-        raise ValueError('Dialogue is too long for this shot. Shorten the lines or increase duration before rendering.')
+    windows=dialogue_windows(seconds,spoken,config,shot)
+    if spoken and not shot.voiceover and any(not row.get('character_id') for row in spoken):
+        raise ValueError('Assign each dialogue line to a character, or explicitly enable off-screen voiceover.')
     text=f'{config.series_style}\nStart state: {shot.start_state or "Match the starting frame and established scene state."}\n{prompt}\n'
     text+=f'Complete the single main action by {usable:g} seconds. Hold the completed end state through {seconds:g} seconds. End state: {shot.end_state or "A settled pose with the action completed; retain props and spatial positions."}\n'
     if previous_prompt:text+='Previous shot context (continuity only, do not repeat its action): '+previous_prompt+'\n'
     if config.audio_mode=='separate':text+='Visible speaking characters articulate the scripted lines naturally; audio will be replaced with controlled tracks.\n'
+    if spoken:
+        text+='The following dialogue assignments and timing override any speech instructions in the visual description. Deliver each exact line once, only by its assigned speaker; do not invent, repeat, share or stretch dialogue.\n'
+        text+=('Simultaneous delivery is explicitly enabled: only the assigned speakers may overlap.\n' if shot.simultaneous_dialogue else 'Take turns in the listed order. No overlapping voices. Only the active speaker moves their lips; all listeners keep their mouths at rest.\n')
+        if not shot.voiceover:text+='Keep every delivering character visibly on screen. Ensure accurate lip synchronization for all speaking characters: each line must match the mouth movements of its assigned speaker, with no off-screen voices, dubbing mismatch or another character mouthing the line.\n'
+        text+=f'Finish every spoken word by {usable:g} seconds. From {usable:g} to {float(seconds):g} seconds, hold the completed pose with lips at rest and no speech; foreground sound effects may continue. Never cut a sentence to create the hold.\n'
     for index,row in enumerate(spoken):
         who=row.get('speaker_name') or row.get('character_id') or 'Narrator'
         identity=row.get('character_id') or 'Narrator'
         speaker='S'+str(int(hashlib.sha256(identity.encode()).hexdigest()[:6],16))
         offscreen=shot.voiceover or not row.get('character_id')
         delivery='says in an off-screen voiceover' if offscreen else 'speaks clearly with synchronised visible lip movement'
-        text+=f'{who} ({speaker}) {delivery}: <d>[{config.language}] {row["line"]}</d>\n'
+        start,end=windows[index]
+        text+=f'Line {index+1}, speaking window {start:g}–{end:g} seconds: {who} ({speaker}) {delivery}: <d>[{config.language}] {row["line"]}</d>\n'
         if offscreen:text+='On-screen lips remain closed.\n'
     sound=shot.effects_description if config.effects else 'Quiet physical action.'
     if config.ambience:sound+=' Consistent low-level scene ambience.'
@@ -166,7 +193,7 @@ def quality_report(output,seconds,lines,config):
     if config.dialogue and lines:
         if not has_audio:warnings.append('Dialogue is planned but the clip has no audio.')
         elif silence_ratio(output,actual)>0.95:warnings.append('Dialogue is planned but the audio is almost silent.')
-    report={'planned_seconds':seconds,'actual_seconds':actual,'has_audio':has_audio,'warnings':warnings,'action_completion':'Human review required','speech_check':'Not transcribed'}
+    report={'planned_seconds':seconds,'actual_seconds':actual,'has_audio':has_audio,'warnings':warnings,'action_completion':'Human review required','speech_check':'Not transcribed','dialogue_deadline_seconds':float(seconds)-config.ending_hold,'ending_hold_seconds':config.ending_hold,'speaker_and_lip_sync_check':'Human visual review required; transcription cannot verify speakers or lip synchronization'}
     if config.verify_speech and config.dialogue and lines and has_audio:
         from openai import OpenAI
         wav=Path(str(output)+'.verify.wav')
@@ -184,7 +211,7 @@ def speech_track(project,output,lines,config,shot,seconds):
     """Stable configured character voices, cached per text/voice; explicit TTS opt-in."""
     from openai import OpenAI
     folder=Path(str(output)+'.audio');folder.mkdir(parents=True,exist_ok=True)
-    pieces=[];offset=0
+    pieces=[];offset=0;timing=[]
     for row in lines:
         voice=config.voices.get(row.get('character_id',''),'coral')
         if voice not in VOICES:raise ValueError('Select a supported voice for each character')
@@ -195,19 +222,26 @@ def speech_track(project,output,lines,config,shot,seconds):
             temporary=path.with_suffix('.tmp');response.stream_to_file(temporary);temporary.replace(path)
         length=duration(path)
         if offset+length>float(seconds)-config.ending_hold:raise ValueError('Generated speech exceeds the available shot time; shorten dialogue or increase duration.')
-        pieces.append((path,offset));offset+=length+0.15
+        pieces.append((path,offset));timing.append({'character_id':row.get('character_id'),'line':row['line'],'start_seconds':offset,'end_seconds':offset+length})
+        offset=0 if shot.simultaneous_dialogue else offset+length+0.15
     if not pieces:return None
     target=folder/'dialogue.wav';args=['ffmpeg','-y'];filters=[]
     for i,(path,start) in enumerate(pieces):args+=['-i',str(path)];filters.append(f'[{i}:a]adelay={int(start*1000)}:all=1[a{i}]')
     filters.append(''.join(f'[a{i}]' for i in range(len(pieces)))+f'amix=inputs={len(pieces)}:normalize=0,apad[out]')
     subprocess.run(args+['-filter_complex',';'.join(filters),'-map','[out]','-t',str(seconds),str(target)],check=True,capture_output=True)
+    atomic_json(Path(str(output)+'.dialogue_timing.json'),{'dialogue_deadline_seconds':float(seconds)-config.ending_hold,'simultaneous_dialogue':shot.simultaneous_dialogue,'lines':timing})
     return target
 
 def apply_audio(project,output,lines,config,shot,seconds,base=None):
     if config.audio_mode!='separate':return
     tracks=[]
     if config.dialogue:
-        if shot.dialogue_audio_id:tracks.append(audio_file(project,shot.dialogue_audio_id,base)[1])
+        if shot.dialogue_audio_id:
+            _,track=audio_file(project,shot.dialogue_audio_id,base)
+            if duration(track)>float(seconds)-config.ending_hold:
+                raise ValueError('Uploaded dialogue exceeds the speaking window before the ending hold. Shorten the track (including trailing silence) or increase shot duration; speech will not be cut.')
+            Path(str(output)+'.dialogue_timing.json').unlink(missing_ok=True)
+            tracks.append(track)
         elif config.speech_provider=='openai' and lines:
             tracks.append(speech_track(project,output,lines,config,shot,seconds))
         elif lines:raise ValueError('Separate audio needs an uploaded dialogue track or enabled speech generation.')
@@ -223,7 +257,9 @@ def apply_audio(project,output,lines,config,shot,seconds,base=None):
         argv=json.loads(command);synced=Path(str(output)+'.synced.mp4')
         if not isinstance(argv,list) or not argv or any(not isinstance(arg,str) for arg in argv):raise ValueError('LIPSYNC_COMMAND_JSON must be an argument array')
         if not all(any(token in arg for arg in argv) for token in ('{video}','{audio}','{output}')):raise ValueError('Lip-sync arguments need {video}, {audio} and {output} placeholders')
-        subprocess.run([str(arg).replace('{video}',str(raw)).replace('{audio}',str(tracks[0])).replace('{output}',str(synced)) for arg in argv],check=True)
+        timing=Path(str(output)+'.dialogue_timing.json')
+        if any('{timing}' in arg for arg in argv) and not timing.exists():raise ValueError('This lip-sync backend requires generated per-speaker timing; use generated speech instead of an uploaded mixed dialogue track.')
+        subprocess.run([str(arg).replace('{video}',str(raw)).replace('{audio}',str(tracks[0])).replace('{output}',str(synced)).replace('{timing}',str(timing)) for arg in argv],check=True)
         probe(synced);source=synced
     args=['ffmpeg','-y','-i',str(source)]
     if tracks:

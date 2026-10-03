@@ -330,3 +330,12 @@ rebuilding the gateway:
 $base = 'http://localhost:8000/projects/nigerian_mechanic_past_machine'
 Invoke-RestMethod -Method Post "$base/resolve-video-jobs" -ContentType 'application/json' -Body '{"confirm":true}' | ConvertTo-Json -Depth 6
 ```
+## Speaking turns and ending holds
+
+In Production → Dialogue, sound & shot continuity, save the ending hold and each shot's assigned dialogue. Speakers take turns by default, deliver only their own exact lines once, and remain visibly on screen while speaking. Use **Allow simultaneous dialogue** only for deliberate overlapping delivery. **Off-screen voiceover** remains an explicit exception.
+
+A 10-second shot with a 2-second ending hold has an 8-second speaking window. The hold does not extend the video. Computed prompts show each line's estimated window and require all speech and the main action to finish before the hold. If dialogue cannot fit, shorten it or use a supported longer shot; the pipeline does not cut speech to make it fit.
+
+Separate generated speech uses measured line lengths and pauses between speakers. Uploaded dialogue tracks must fit entirely before the hold, including trailing silence. Effects can continue through the hold. Native LTX/MiniMax audio receives these instructions, but model adherence, speaker identity and visual lip synchronization still require review. Transcription checks wording, not lip movement. Check each speaker, complete sentence and silent hold before accepting the clip.
+
+Changes apply to newly rendered versions. Use **Edit / new version** to regenerate existing clips with the new instructions. Existing approved files are preserved. No database migration is needed: global settings stay in `video_direction.json`, per-shot options in `shot_direction.json`, and dialogue in `shot_dialogue`. Generated separate speech also saves a `.dialogue_timing.json` manifest next to the video; a compatible lip-sync command may optionally accept a `{timing}` placeholder for per-speaker start/end times. Such a backend must actually support multiple visible speakers; the manifest alone does not supply that capability.

@@ -12,6 +12,48 @@ import automation_api as api
 from fastapi.testclient import TestClient
 
 class VideoDirectionTests(unittest.TestCase):
+    def test_two_speakers_take_turns_and_finish_before_two_second_hold(self):
+        lines=[{'character_id':'KEMI','line':'Who is there?'},{'character_id':'ADA','line':'It is me.'}]
+        config=direction.Direction(ending_hold=2);shot=direction.ShotDirection()
+        windows=direction.dialogue_windows(10,lines,config,shot)
+        self.assertLess(windows[0][1],windows[1][0]);self.assertEqual(windows[-1][1],8)
+        prompt=direction.compile_prompt('They talk.',10,lines,config,shot,'ltx')
+        for rule in ['No overlapping voices','Finish every spoken word by 8 seconds','From 8 to 10 seconds','no off-screen voices','Only the active speaker']:
+            self.assertIn(rule,prompt)
+        self.assertEqual(prompt.count('<d>[English] Who is there?</d>'),1)
+
+    def test_simultaneous_delivery_and_voiceover_are_explicit(self):
+        lines=[{'character_id':'A','line':'Hello'},{'character_id':'B','line':'Hello'}]
+        shot=direction.ShotDirection(simultaneous_dialogue=True)
+        windows=direction.dialogue_windows(10,lines,direction.Direction(),shot)
+        self.assertEqual(windows,[(0,9),(0,9)])
+        self.assertIn('explicitly enabled',direction.compile_prompt('',10,lines,direction.Direction(),shot,'ltx'))
+        with self.assertRaisesRegex(ValueError,'Assign each'):
+            direction.compile_prompt('',10,[{'line':'Hello'}],direction.Direction(),direction.ShotDirection(),'ltx')
+        self.assertIn('off-screen voiceover',direction.compile_prompt('',10,[{'line':'Hello'}],direction.Direction(),direction.ShotDirection(voiceover=True),'ltx'))
+
+    def test_measured_speech_timing_reserves_hold_and_rejects_overflow(self):
+        with tempfile.TemporaryDirectory() as folder,patch.dict(sys.modules,{'openai':Mock()}),patch('openai.OpenAI') as client,patch.object(direction,'duration',return_value=3),patch.object(direction.subprocess,'run') as run:
+            client.return_value.audio.speech.create.return_value.stream_to_file.side_effect=lambda path:Path(path).write_bytes(b'speech')
+            run.side_effect=lambda args,**kw:Path(args[-1]).write_bytes(b'mixed')
+            output=Path(folder)/'clip.mp4';lines=[{'character_id':'A','line':'Hello'},{'character_id':'B','line':'Goodbye'}]
+            direction.speech_track('film',output,lines,direction.Direction(ending_hold=2),direction.ShotDirection(),10)
+            timing=json.loads(Path(str(output)+'.dialogue_timing.json').read_text())
+            self.assertEqual(timing['dialogue_deadline_seconds'],8)
+            self.assertLess(timing['lines'][0]['end_seconds'],timing['lines'][1]['start_seconds'])
+            with patch.object(direction,'duration',return_value=4):
+                with self.assertRaisesRegex(ValueError,'exceeds'):direction.speech_track('film',output,lines,direction.Direction(ending_hold=2),direction.ShotDirection(),10)
+
+    def test_uploaded_speech_over_hold_deadline_fails_before_any_processing(self):
+        with patch.object(direction,'audio_file',return_value=({'role':'dialogue'},Path('dialogue.wav'))),patch.object(direction,'duration',return_value=8.1),patch.object(direction.subprocess,'run') as run:
+            config=direction.Direction(audio_mode='separate',effects=False,ending_hold=2)
+            shot=direction.ShotDirection(voiceover=True,dialogue_audio_id='x')
+            with self.assertRaisesRegex(ValueError,'ending hold'):
+                direction.validate_resources('film',[{'line':'Hello'}],config,shot,seconds=10)
+            with self.assertRaisesRegex(ValueError,'ending hold'):
+                direction.apply_audio('film','clip.mp4',[{'line':'Hello'}],config,shot,10)
+            run.assert_not_called()
+
     def test_transcript_mismatch_is_reported_without_claiming_speaker_validation(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(direction,'probe',return_value={'format':{'duration':10},'streams':[{'codec_type':'audio'}]}),patch.object(direction,'silence_ratio',return_value=0),patch.dict(sys.modules,{'openai':Mock()}),patch('openai.OpenAI') as client,patch.object(direction.subprocess,'run') as run:
             run.side_effect=lambda args,**kw:Path(args[-1]).write_bytes(b'audio')

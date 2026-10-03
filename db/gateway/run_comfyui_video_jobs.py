@@ -202,7 +202,7 @@ def main():
                 frame = job['frame']
                 direction=read_direction(project);shot_direction=read_shot_direction(project,job['shot_id'])
                 lines=dialogue_rows(cur,project,job['shot_id'])
-                validate_resources(project,lines,direction,shot_direction)
+                validate_resources(project,lines,direction,shot_direction,seconds=seconds)
                 transition=shot_direction.transition if shot_direction.transition!='default' else direction.continuity
                 previous=predecessor(cur,project,job,direction.require_approved_previous) if transition in {'continuous','new_angle'} else None
                 if previous:
