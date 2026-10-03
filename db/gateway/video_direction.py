@@ -33,6 +33,13 @@ class Direction(BaseModel):
     ending_hold: float=Field(default=1,ge=0.25,le=3)
     episode_music_id: str | None=None
     voices: dict[str,str]=Field(default_factory=dict)
+    auto_recover: bool=True
+    speaker_rules: bool=True
+    lip_sync_prompt: bool=True
+    ending_hold_prompt: bool=True
+    continuity_prompt: bool=True
+    silent_without_dialogue: bool=True
+    extra_instructions: str=Field(default='',max_length=3000)
 
 class ShotDirection(BaseModel):
     transition: Literal['default','continuous','new_angle','new_scene']='default'
@@ -134,20 +141,22 @@ def compile_prompt(prompt,seconds,lines,config,shot,model,previous_prompt=''):
     if spoken and not shot.voiceover and any(not row.get('character_id') for row in spoken):
         raise ValueError('Assign each dialogue line to a character, or explicitly enable off-screen voiceover.')
     text=f'{config.series_style}\nStart state: {shot.start_state or "Match the starting frame and established scene state."}\n{prompt}\n'
-    text+=f'Complete the single main action by {usable:g} seconds. Hold the completed end state through {seconds:g} seconds. End state: {shot.end_state or "A settled pose with the action completed; retain props and spatial positions."}\n'
-    if previous_prompt:text+='Previous shot context (continuity only, do not repeat its action): '+previous_prompt+'\n'
+    if config.ending_hold_prompt:text+=f'Complete the single main action by {usable:g} seconds. Hold the completed end state through {seconds:g} seconds. End state: {shot.end_state or "A settled pose with the action completed; retain props and spatial positions."}\n'
+    elif shot.end_state:text+='End state: '+shot.end_state+'\n'
+    if previous_prompt and config.continuity_prompt:text+='Previous shot context (continuity only, do not repeat its action): '+previous_prompt+'\n'
     if config.audio_mode=='separate':text+='Visible speaking characters articulate the scripted lines naturally; audio will be replaced with controlled tracks.\n'
     if spoken:
-        text+='The following dialogue assignments and timing override any speech instructions in the visual description. Deliver each exact line once, only by its assigned speaker; do not invent, repeat, share or stretch dialogue.\n'
-        text+=('Simultaneous delivery is explicitly enabled: only the assigned speakers may overlap.\n' if shot.simultaneous_dialogue else 'Take turns in the listed order. No overlapping voices. Only the active speaker moves their lips; all listeners keep their mouths at rest.\n')
-        if not shot.voiceover:text+='Keep every delivering character visibly on screen. Ensure accurate lip synchronization for all speaking characters: each line must match the mouth movements of its assigned speaker, with no off-screen voices, dubbing mismatch or another character mouthing the line.\n'
-        text+=f'Finish every spoken word by {usable:g} seconds. From {usable:g} to {float(seconds):g} seconds, hold the completed pose with lips at rest and no speech; foreground sound effects may continue. Never cut a sentence to create the hold.\n'
+        if config.speaker_rules:
+            text+='The following dialogue assignments and timing override any speech instructions in the visual description. Deliver each exact line once, only by its assigned speaker; do not invent, repeat, share or stretch dialogue.\n'
+            text+=('Simultaneous delivery is explicitly enabled: only the assigned speakers may overlap.\n' if shot.simultaneous_dialogue else 'Take turns in the listed order. No overlapping voices. Only the active speaker moves their lips; all listeners keep their mouths at rest.\n')
+        if not shot.voiceover and config.lip_sync_prompt:text+='Keep every delivering character visibly on screen. Ensure accurate lip synchronization for all speaking characters: each line must match the mouth movements of its assigned speaker, with no off-screen voices, dubbing mismatch or another character mouthing the line.\n'
+        if config.ending_hold_prompt:text+=f'Finish every spoken word by {usable:g} seconds. From {usable:g} to {float(seconds):g} seconds, hold the completed pose with lips at rest and no speech; foreground sound effects may continue. Never cut a sentence to create the hold.\n'
     for index,row in enumerate(spoken):
         who=row.get('speaker_name') or row.get('character_id') or 'Narrator'
         identity=row.get('character_id') or 'Narrator'
         speaker='S'+str(int(hashlib.sha256(identity.encode()).hexdigest()[:6],16))
         offscreen=shot.voiceover or not row.get('character_id')
-        delivery='says in an off-screen voiceover' if offscreen else 'speaks clearly with synchronised visible lip movement'
+        delivery='says in an off-screen voiceover' if offscreen else ('speaks clearly with synchronised visible lip movement' if config.lip_sync_prompt else 'says')
         start,end=windows[index]
         text+=f'Line {index+1}, speaking window {start:g}–{end:g} seconds: {who} ({speaker}) {delivery}: <d>[{config.language}] {row["line"]}</d>\n'
         if offscreen:text+='On-screen lips remain closed.\n'
@@ -157,7 +166,8 @@ def compile_prompt(prompt,seconds,lines,config,shot,model,previous_prompt=''):
     if not config.effects and not config.ambience:sound='N/A'
     score='N/A'
     text=f'integrated_multimodal_description: [Shot 1] {text}\noverall_soundscape: {sound}\nnon_diegetic_music: {score}'
-    if not spoken:text+='\nCharacters perform the action silently with their lips at rest.'
+    if not spoken and config.silent_without_dialogue:text+='\nCharacters perform the action silently with their lips at rest.'
+    if config.extra_instructions:text+='\nAdditional direction: '+config.extra_instructions
     return text
 
 def predecessor(cur,project,job,approved=False):

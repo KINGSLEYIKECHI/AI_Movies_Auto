@@ -19,7 +19,7 @@ from run_comfyui_video_jobs import saved_video, completed_video, record_video, s
 from pydantic import BaseModel, Field
 import mysql.connector
 from asset_control import IMAGE_TYPES, MAX_UPLOAD_BYTES, UNRESOLVED_REJECTIONS, project_folder, scoped_file, save_upload, upload_reference, write_options, read_options
-from project_cleanup import delete_project, recover_cleanup
+from project_cleanup import delete_project, recover_cleanup, delete_video_asset, recover_asset_cleanup
 from shot_references import context as shot_context, library as reference_library, selected_assets
 from video_direction import Direction,ShotDirection,VOICES,read_direction,write_direction,read_shot_direction,write_shot_direction,save_audio,audio_file,compile_prompt
 
@@ -35,6 +35,49 @@ active = False
 class Review(BaseModel):
     status: str
     action_complete: bool=False
+
+class VideoDeletion(BaseModel):
+    confirm: bool=False
+
+@app.delete('/projects/{project_id}/assets/{asset_id}')
+def delete_asset_version(project_id:str,asset_id:int,body:VideoDeletion):
+    with lock:
+        project(project_id);require_idle(project_id)
+        if not body.confirm:raise HTTPException(400,'Confirm deletion of this video version and its related files')
+        conn=mysql.connector.connect(**DB)
+        try:
+            result=delete_video_asset(conn,project_id,asset_id,ROOT)
+            pause_for_change(project_id)
+            return {**result,'message':result.get('message','Video version and related local processing files deleted. Production paused; approve prompts before resuming.')}
+        except ValueError as exc:raise HTTPException(409,str(exc))
+        finally:conn.close()
+
+@app.post('/projects/{project_id}/heal-videos')
+def heal_video_jobs(project_id:str):
+    """Reconcile verified receipts only. Never reset unknown or resubmit failed work."""
+    with lock:
+        project(project_id)
+        if active:return {'status':'busy','jobs':[],'message':'Worker is active; recovery deferred.'}
+        conn=mysql.connector.connect(**DB)
+        try:pending=recover_asset_cleanup(conn,project_id,ROOT)
+        finally:conn.close()
+        jobs,_=query("SELECT id,output_path FROM jobs WHERE project_id=%s AND job_type='shot_video' AND status='running' ORDER BY id LIMIT 5",(project_id,))
+        results=[]
+        for job in jobs:
+            try:
+                output=scoped_file(project_id,job['output_path'],ROOT);receipt=Path(str(output)+'.comfy.json')
+                data=json.loads(receipt.read_text(encoding='utf-8')) if receipt.exists() else {}
+                if data.get('phase')=='ready' and has_saved_video(output) and Path(str(output)+'.quality.json').exists():
+                    result=recover_video(project_id,job['id'])
+                elif data.get('phase') in {'processing_failed','postprocessing'}:
+                    result=recover_video(project_id,job['id'])
+                else:
+                    # Missing history, unknown submissions and active queues remain untouched.
+                    result={'status':'needs_attention','message':'No verified completed receipt. Inspect ComfyUI queue/history; no retry submitted.'}
+                results.append({'id':job['id'],**result})
+            except (HTTPException,ValueError,OSError,requests.RequestException) as exc:
+                results.append({'id':job['id'],'status':'needs_attention','message':str(exc.detail) if isinstance(exc,HTTPException) else str(exc)})
+        return {'status':'checked','jobs':results,'pending_cleanup':pending,'message':'Recovery check complete. Verified finished videos restored to Review; unknown work and failed renders require attention. No new renders submitted.'}
 
 class AssetRevision(BaseModel):
     prompt: str | None = Field(default=None, min_length=1, max_length=24000)
@@ -921,6 +964,8 @@ def automation_tick():
     for row in rows:
         settings=read_settings(row['project_id'])
         if not settings or not settings.get('automation_enabled'):continue
+        if read_direction(row['project_id'],ROOT).auto_recover:
+            heal_video_jobs(row['project_id'])
         dashboard=production_dashboard(row['project_id'])
         if dashboard['next_action']=='continue':
             try:return run_worker(row['project_id'],'pipeline',RunOptions(limit=1))

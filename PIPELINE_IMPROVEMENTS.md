@@ -1,5 +1,11 @@
 # Further production controls
 
+The maintained roadmap is now [TODO.md](TODO.md). Review its implementation and
+validation status before starting work. [UPDATE_WORKFLOW.md](UPDATE_WORKFLOW.md)
+contains build commands and the required commit/delivery checklist. The ideas
+below are retained as background; parts of audio control, continuity and recovery
+are now implemented, while the remaining tasks are tracked in the living TODO.
+
 The current update adds editable versions, optional uploaded image references,
 individual rendering and confirmed project deletion. The following work is
 recommended next, in order of usefulness.
@@ -30,6 +36,6 @@ recommended next, in order of usefulness.
    references, media and settings. Provide restorable archive/trash controls in
    addition to permanent deletion.
 
-These are proposed enhancements, not implemented features. A dependency graph,
-budget control and preflight checks would provide the largest immediate increase
-in control and reduce wasted rendering.
+The living TODO distinguishes existing controls from remaining improvements.
+A dependency graph, budget control and broader preflight checks remain useful
+next steps for reducing wasted rendering.
